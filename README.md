@@ -2,15 +2,13 @@
 
 Dense character notation for LLM-driven NPCs.
 
-You write a file. The file knows who someone is, what they want, what they'll never say out loud, and how all of it shifts when trust builds or the world goes wrong. You hand it to the runtime. The runtime hands the right slice to the model at the right moment. The character behaves like someone who's been living in that town for twenty years, because the notation gave the model enough to work with and the runtime knew what to surface.
+You write one file. Effigy compiles it into a runtime prompt context that knows what your character would say, what she'd deflect, which version of herself she is right now, and what it costs her to change.
 
 *If you just want to install it: [Installation](#installation). [Quick Start](#quick-start). I won't be offended.*
 
 ---
 
-## The Format
-
-Here. This is me:
+## Here. This is me:
 
 ```
 # Effigy v0.2 -- test fixture
@@ -164,7 +162,7 @@ WHY: Dael never volunteers information directly — not because she doesn't have
 ]
 ```
 
-That's one character. The whole thing fits in a text file. The parser reads it, the runtime decides what the model needs to see right now, and the model does the rest.
+That file is the character. Everything else is what you do with it.
 
 ---
 
@@ -176,62 +174,79 @@ Layer 2 (runtime):       AST + game state  -->  prompt.py (dialogue context)
 Layer 3 (evolution):     AST + history     -->  evolve.py (emotional state, intentions)
 ```
 
-**Layer 1** is deterministic. The parser reads the `.effigy` file and produces a `CharacterAST`. `expand.py` serializes that to JSON. No model involved. You can inspect the output, diff it, version it.
+**Layer 1** parses the `.effigy` source into a `CharacterAST`, then expands it to a portable JSON structure. Run it once. Check it in. The output is deterministic.
 
-**Layer 2** is where game state meets character. You pass the AST, the current trust score, any known facts, and relevant state variables. It resolves the arc phase, selects the right MES exemplars, surfaces only the goals and behavioral constraints that are active right now. What comes out fits in a system prompt.
+**Layer 2** is what runs on every turn. It takes the AST and your current game state — trust score, known facts, turn count, arbitrary state variables — and emits an optimized prompt context. The right arc phase. The right goals. The right examples, selected for this moment. The WRONG blocks stay out of the output. The secrets that haven't been earned stay quiet.
 
-**Layer 3** is optional and heavier. It computes emotional state from history and inputs, resolves intentions, and builds a synthesis prompt for generating evolved character state. You'd call this between sessions or when something significant happened.
+Here's what Layer 2 produces for Dael at `trust=0.3`, `fact:knows_her_name`:
 
-Here's what Layer 2 produces for this character at `trust=0.3`, `knows_her_name` known, `ruin=2`:
+```xml
+<presence>Behind the bar, drying a glass that's already dry.</presence>
 
-```
-CHARACTER ARC PHASE: THAWING
-Voice shift: Less guarded. Pauses before deflecting. Starting to let you see that she notices things she shouldn't.
+<voice>
+  <kernel>Measured, warm, evasive. Sentences start open, end clipped. Deflects with hospitality — not because she doesn't know, but because knowing is what keeps her useful.</kernel>
+  <peak>The warmth drops. Words slow. She stops reaching for the glass. Whatever she's about to say, it costs her something.</peak>
+</voice>
 
-ACTIVE GOALS (what this character is trying to accomplish):
-  - keep_peace (priority: 0.8)
-  - protect_regulars (priority: 0.7)
+<voice_examples canonical="true">
+  {{char}}: *sets down a glass that didn't need setting down* What brings you out this way? We don't get many new faces.
+  {{char}}: *wipes the bar without looking up* Folks around here keep to themselves. I just pour the drinks. *refills yours without being asked*
+</voice_examples>
 
-RELATIONSHIPS (how this character feels about other NPCs):
-  - town_mayor: protects (0.6) -- Owes me a favor. Thinks that makes us even. It doesn't.
-  - old_fisher: trusts (0.8) -- Tells me everything. Doesn't know I write it down.
-  - newcomer: assesses (0.3) -- Watching. First person in years who might actually deserve the truth.
-  - deputy_cole: tolerates (0.4) -- Drinks too much. Talks too loud. Useful.
-
-BEHAVIORAL TRAITS: observant, strategic-listener, hospitality-as-intelligence, loyal-to-a-fault, stubbornly-neutral, reads-the-room-before-she-reads-the-menu
-
-VOICE REINFORCEMENT: Measured, warm, evasive. Sentences start open, end clipped. Deflects with hospitality — not because she doesn't know, but because knowing is what keeps her useful.
-
-NEVER (this character would NEVER):
+<never>
   - Never gossips — gossip is ammunition you waste
   - Never raises her voice — volume is a loss of control she can't afford
   - Never admits she overheard anything directly — plausible deniability is the only protection she has
   - Never serves a drink without noticing who's watching
+</never>
 
-BEHAVIORAL QUIRKS:
+<quirks>
   - Polishes a glass that's already clean — the routine is the mask
   - Refills drinks mid-sentence — keeps people talking, keeps her close enough to hear
   - Glances at the door when she wants someone to leave — or when she's checking who might walk in
   - Adjusts the ledger under the counter when she thinks no one's looking
+</quirks>
 
-PROPS (concrete objects this character can reference -- use naturally, do NOT list or info-dump):
+<props>
   the glass she's always polishing, the ledger under the counter, the stool with the good view of the back room, the bell above the door
+</props>
 
-DO NOT generate dialogue like these examples:
-  WRONG: "Oh yes, the mayor met with the Henderson family last Tuesday at 7pm. They discussed the land deal and I heard every word."
-  RIGHT: "The mayor comes in sometimes. I pour the drinks, I don't take notes. *wipes the bar* Another round?"
-  WHY: Dael never volunteers information directly — not because she doesn't have it, but because giving it away for free is how you stop being useful and start being dangerous. She trades in silence. The deflection IS the character.
+<relationships>
+  <rel target="town_mayor" type="protects" intensity="0.6">Owes me a favor. Thinks that makes us even. It doesn't.</rel>
+  <rel target="old_fisher" type="trusts" intensity="0.8">Tells me everything. Doesn't know I write it down.</rel>
+  <rel target="newcomer" type="assesses" intensity="0.3">Watching. First person in years who might actually deserve the truth.</rel>
+  <rel target="deputy_cole" type="tolerates" intensity="0.4">Drinks too much. Talks too loud. Useful.</rel>
+</relationships>
 
-THEMATIC ROLE: The line between keeping the peace and keeping people quiet
+<traits>observant, strategic-listener, hospitality-as-intelligence, loyal-to-a-fault, stubbornly-neutral, reads-the-room-before-she-reads-the-menu</traits>
+
+<drivermap>big_five_O-, big_five_C+, big_five_A+</drivermap>
+
+<arc_phase name="thawing">
+  <voice_shift>Less guarded. Pauses before deflecting. Starting to let you see that she notices things she shouldn't.</voice_shift>
+</arc_phase>
+
+<active_goals>
+  <goal weight="0.8" name="keep_peace">Redirects heat with hospitality. Refills drinks to cut off arguments before they start.</goal>
+  <goal weight="0.7" name="protect_regulars">Never names them. Changes the subject when the conversation turns toward anyone she's seen in the back room.</goal>
+</active_goals>
+
+<voice_examples rotating="true">
+  {{char}}: You ask a lot of questions for someone just passing through. *slides a menu across, holds it a beat too long* Hungry?
+</voice_examples>
+
+<voice_reminder>Measured, warm, evasive. Sentences start open, end clipped. Deflects with hospitality — not because she doesn't know, but because knowing is what keeps her useful.</voice_reminder>
 ```
 
-That goes in your system prompt. The model knows who it is, what it wants, and what it won't do. What the model doesn't see — the secrets it hasn't earned, the arc phase it hasn't reached — stays in the file until conditions say otherwise.
+That fits in a system prompt. It's meant to.
+
+**Layer 3** handles evolution. Emotional state as a function of inputs — instability, pressure, accumulated facts. Intention modeling. What she wants this turn, and why that's shifted from what she wanted three turns ago.
 
 ---
 
 ## Notation Syntax
 
-Header fields declare identity:
+Header fields go at the top, one per line:
 
 | Field | Purpose |
 |---|---|
@@ -239,16 +254,16 @@ Header fields declare identity:
 | `@name` | Display name |
 | `@role` | Narrative role |
 | `@arch` | Character archetype |
-| `@narr` | Narrative alignment |
-| `@presence` | Physical/spatial anchor |
-| `@tropes` | Trope tags |
-| `@theme` | Thematic throughline |
+| `@narr` | Narrator stance |
+| `@presence` | Physical/spatial grounding line |
+| `@tropes` | Applicable trope tags |
+| `@theme` | The thing this character is actually about |
 
-Blocks carry everything else:
+Then the blocks:
 
 | Block | Contents |
 |---|---|
-| `VOICE{}` | `kernel` (baseline voice) + `peak` (stressed voice) |
+| `VOICE{}` | kernel (baseline voice) + peak (stressed voice) |
 | `TRAITS[]` | Comma-separated behavioral traits |
 | `NEVER[]` | Hard behavioral constraints |
 | `QUIRKS[]` | Physical/behavioral tells |
@@ -267,7 +282,7 @@ Blocks carry everything else:
 | `ARRIVE[]` | Entrance lines |
 | `DEPART[]` | Exit lines |
 
-The full test fixture lives at [`effigy/tests/fixtures/test_npc.effigy`](effigy/tests/fixtures/test_npc.effigy).
+The full working fixture is at [`effigy/tests/fixtures/test_npc.effigy`](effigy/tests/fixtures/test_npc.effigy).
 
 ---
 
@@ -309,14 +324,14 @@ from effigy.expand import expand
 data = expand(ast)
 ```
 
-**Build a dialogue context (Layer 2):**
+**Build a dialogue context:**
 
 ```python
 from effigy.prompt import build_dialogue_context
 ctx = build_dialogue_context(ast, trust=0.3, known_facts={"knows_her_name"}, turn=5, state_vars={"ruin": 2})
 ```
 
-**Compute emotional state and evolution context (Layer 3):**
+**Evolve:**
 
 ```python
 from effigy.evolve import build_evolution_context, compute_emotional_state
@@ -328,9 +343,9 @@ ctx = build_evolution_context(ast, trust=0.3, state_vars={"ruin": 2})
 
 ## Concepts
 
-**State variables** are the world talking back to the character. You pass them as a dict — `{"ruin": 2, "faction_tension": 0.7}` — and the runtime uses them to resolve arc conditions. `ARC` phases can gate on state variables alongside trust and facts: `open → trust>=0.6 AND ruin>=3`. The character doesn't unlock because the player did something nice. She unlocks because enough of the world has fallen apart that pretending to not know costs more than knowing.
+**State variables** are arbitrary named values your game engine tracks — `trust`, `ruin`, `days_since_event`, whatever your world requires. They gate ARC phase transitions and can inflate or suppress goal weights at runtime. You define the names; effigy evaluates the conditions. The system doesn't care what `ruin` means. It only cares when the threshold is crossed.
 
-**Emotional inputs** feed Layer 3. They're separate from state variables — closer to the accumulation of a session than the global world state. You pass values like `{"instability": 0.5, "threat_proximity": 0.8}` to `compute_emotional_state`, and it produces an `EmotionalState` that can shift how `build_evolution_context` weights active goals and behavioral constraints. Useful when a character has had a hard few exchanges and you want the model to feel that without rewriting the `.effigy` file.
+**Emotional inputs** feed Layer 3's `compute_emotional_state`. They're normalized floats that represent pressure on the character in the current moment — instability, threat level, fatigue, unresolved obligation. Effigy combines them with the character's drivermap and known facts to produce an emotional state object that shifts what the character is inclined toward, without overwriting who she is. The baseline holds. The pressure shows at the edges.
 
 ---
 
@@ -349,45 +364,44 @@ python -m effigy metrics ./effigy_files/ ./corpus_jsons/ --char-map map.json
 
 ## API Reference
 
-| Module | Purpose | Exports |
-|---|---|---|
-| `effigy.parser` | Effigy parser — .effigy notation → CharacterAST. | `parse`, `parse_file`, `ParseError` |
-| `effigy.notation` | AST node definitions | `CharacterAST`, `VoiceAST`, `ArcPhaseAST`, `GoalAST`, `SecretAST`, `RelationshipAST`, `...` |
-| `effigy.expand` | Effigy Layer 1 — AST → JSON (deterministic, no LLM). | `expand`, `expand_to_json` |
-| `effigy.prompt` | Effigy Layer 2 -- AST + game state -> optimized prompt context. | `build_dialogue_context`, `resolve_arc_phase`, `resolve_active_goals`, `get_arc_phase_dict`, `select_mes_examples` |
-| `effigy.evolve` | Effigy Layer 3 — Dynamic profile evolution. | `compute_emotional_state`, `EmotionalState`, `compute_intentions`, `build_evolution_context`, `build_synthesis_prompt` |
-| `effigy.evaluate` | Effigy evaluation — roundtrip fidelity scoring. | `evaluate_effigy_file`, `evaluate_tier1`, `evaluate_all` |
-| `effigy.metrics` | Effigy metrics — character-domain measurements. | `measure_character`, `CorpusMetrics` |
-| `effigy.corpus` | Effigy corpus — load character JSONs for the discovery loop. | `load_corpus`, `CharacterSpec` |
-| `effigy.discovery` | Effigy discovery loop — find the densest personality dossier format. | `run_discovery` |
+| Module | Exports |
+|---|---|
+| `effigy.parser` | `parse`, `parse_file`, `ParseError` |
+| `effigy.notation` | `CharacterAST`, `VoiceAST`, `ArcPhaseAST`, `GoalAST`, `SecretAST`, `RelationshipAST`, `PostProcRuleAST`, `...` |
+| `effigy.expand` | `expand`, `expand_to_json` |
+| `effigy.prompt` | `build_dialogue_context`, `build_static_context`, `build_dynamic_state`, `build_dialogue_context_debug`, `resolve_arc_phase`, `resolve_active_goals`, `get_arc_phase_dict`, `select_mes_examples`, `select_canonical_mes`, `select_rotating_mes`, `get_wrong_examples` |
+| `effigy.evolve` | `compute_emotional_state`, `EmotionalState`, `compute_intentions`, `build_evolution_context`, `build_synthesis_prompt` |
+| `effigy.evaluate` | `evaluate_effigy_file`, `evaluate_tier1`, `evaluate_all`, `wrong_bleed_score`, `voice_drift_score`, `compliance_check`, `evaluate_generation` |
+| `effigy.validators` | `RegexValidator`, `ValidationViolation`, `validate`, `strip_violations`, `validators_from_ast`, `has_blocking_violation`, `revise_if_violated` |
+| `effigy.metrics` | `measure_character`, `CorpusMetrics` |
+| `effigy.corpus` | `load_corpus`, `CharacterSpec` |
+| `effigy.discovery` | `run_discovery` |
 
 ---
 
 ## Integration
 
-See [INTEGRATION.md](INTEGRATION.md) for engine integration patterns — how to wire `build_dialogue_context` into a dialogue loop, when to call Layer 3, and how to pass state variables from your game systems. The Voice Authoring Guide covers writing `.effigy` files from scratch, including how to use `WRONG[]` to train the model away from the failure modes your character is most prone to.
+See [INTEGRATION.md](INTEGRATION.md) for game engine hookups, turn-loop patterns, and trust management. The Voice Authoring Guide covers how to write VOICE kernels that hold under pressure, WRONG blocks that actually prevent drift, and MES exemplars worth selecting.
 
 ---
 
 ## Influences
 
-The format has ancestors. It's built on top of what worked.
+Effigy's direct ancestors are the PList and Ali:Chat structured character card formats from the SillyTavern community — the observation that a flat, dense character specification in a system prompt outperforms freeform prose descriptions. Effigy extends that insight with a runtime layer, a condition DSL, and a notation purpose-built for characters who change.
 
-The PList and Ali:Chat formats, developed by the SillyTavern community, established the core insight: structured character cards for LLM prompting outperform freeform prose bios. Effigy extends that foundation with runtime state resolution, trust-gated content, and a three-layer architecture that separates compile-time character definition from runtime context selection from session-level evolution.
-
-| Source | Link | What it contributed | Where it shows up |
+| Source | Link | What it contributed | Where it shows |
 |---|---|---|---|
-| Valve/Ruskin GDC 2012 | [GDC Vault](https://www.gdcvault.com/play/1015528/) | Fuzzy pattern-matched dialogue rules (Left 4 Dead) | ARC conditions |
+| Valve/Ruskin GDC 2012 | [gdcvault.com](https://www.gdcvault.com/play/1015528/) | Fuzzy pattern-matched dialogue rules (Left 4 Dead) | ARC conditions |
 | Larian BG3 | — | Dialogue flags for state-gated conversation | Fact-gated arc conditions |
 | Inworld AI | [inworld.ai](https://inworld.ai/) | Identity / Knowledge / Goals / Memory as separate character components | Layer decomposition |
-| FEAR / Jeff Orkin GDC 2006 | [GDC Vault](https://gdcvault.com/play/1013282/) | Goal-oriented action planning (GOAP) | GOALS |
-| Park et al. 2023 — Generative Agents | [arXiv](https://arxiv.org/abs/2304.03442) | Memory retrieval as recency × importance × relevance | Memory synthesis |
-| Shao et al. 2023 — Character-LLM | [arXiv](https://arxiv.org/abs/2310.10158) | Protective experiences for out-of-character refusal | NEVER, WRONG |
-| Xu et al. 2025 — A-Mem | [arXiv](https://arxiv.org/abs/2502.12110) | Agentic memory that evolves as new notes link to old | Emotional state |
+| FEAR / Jeff Orkin GDC 2006 | [gdcvault.com](https://gdcvault.com/play/1013282/) | Goal-oriented action planning (GOAP) | GOALS |
+| Park et al. 2023 — Generative Agents | [arxiv.org](https://arxiv.org/abs/2304.03442) | Memory retrieval as recency × importance × relevance | Memory synthesis |
+| Shao et al. 2023 — Character-LLM | [arxiv.org](https://arxiv.org/abs/2310.10158) | Protective experiences for out-of-character refusal | NEVER, WRONG |
+| Xu et al. 2025 — A-Mem | [arxiv.org](https://arxiv.org/abs/2502.12110) | Agentic memory that evolves as new notes link to old | Emotional state |
 | Naughty Dog writers' room | — | Writing many more lines than you'll use, then selecting | MES curation |
 | SillyTavern community (PList + Ali:Chat) | — | Structured character cards for LLM prompting | Block-based notation |
 
-What's novel in this format:
+What effigy does that these don't:
 
 - Trust-gated MES selection
 - WRONG anti-pattern examples
@@ -398,11 +412,11 @@ What's novel in this format:
 
 ---
 
-*\*pauses before reaching for the glass. Sets it down.*\*
+*\*pauses before answering, sets the glass down\**
 
 The fixture is at [`effigy/tests/fixtures/test_npc.effigy`](effigy/tests/fixtures/test_npc.effigy). You know where to find me.
 
-This library does what I do. It listens — to everything in the file, to the state of the world, to how much trust has been earned. It decides what to surface and what to hold back. Voices carry when people think the barkeep isn't listening. The runtime knows which layer of someone to hand forward, and it keeps the rest under the counter until the conditions say it's time.
+Voices carry when people think the barkeep isn't listening. That's the whole idea. You write down who meets whom, what they ordered, how long they stayed. At some point it stops being inventory. Effigy is a system for encoding that — the observation, the categorization, the decision about who deserves what, and when. The character knows more than she says. The runtime decides what to surface. The WRONG blocks are there because giving it all away for free is how you stop being useful and start being dangerous.
 
 ---
 

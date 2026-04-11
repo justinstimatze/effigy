@@ -79,13 +79,15 @@ def _extract_facts(ast, raw_text: str) -> dict:
     # Module docstrings (introspected, not hardcoded)
     import effigy.parser, effigy.expand, effigy.prompt, effigy.evolve
     import effigy.evaluate, effigy.metrics, effigy.corpus, effigy.discovery
+    import effigy.validators
     modules = {
         "effigy.parser": {"doc": (effigy.parser.__doc__ or "").split("\n")[0], "exports": ["parse", "parse_file", "ParseError"]},
-        "effigy.notation": {"doc": "AST node definitions", "exports": ["CharacterAST", "VoiceAST", "ArcPhaseAST", "GoalAST", "SecretAST", "RelationshipAST", "..."]},
+        "effigy.notation": {"doc": "AST node definitions", "exports": ["CharacterAST", "VoiceAST", "ArcPhaseAST", "GoalAST", "SecretAST", "RelationshipAST", "PostProcRuleAST", "..."]},
         "effigy.expand": {"doc": (effigy.expand.__doc__ or "").split("\n")[0], "exports": ["expand", "expand_to_json"]},
-        "effigy.prompt": {"doc": (effigy.prompt.__doc__ or "").split("\n")[0], "exports": ["build_dialogue_context", "resolve_arc_phase", "resolve_active_goals", "get_arc_phase_dict", "select_mes_examples"]},
+        "effigy.prompt": {"doc": (effigy.prompt.__doc__ or "").split("\n")[0], "exports": ["build_dialogue_context", "build_static_context", "build_dynamic_state", "build_dialogue_context_debug", "resolve_arc_phase", "resolve_active_goals", "get_arc_phase_dict", "select_mes_examples", "select_canonical_mes", "select_rotating_mes", "get_wrong_examples"]},
         "effigy.evolve": {"doc": (effigy.evolve.__doc__ or "").split("\n")[0], "exports": ["compute_emotional_state", "EmotionalState", "compute_intentions", "build_evolution_context", "build_synthesis_prompt"]},
-        "effigy.evaluate": {"doc": (effigy.evaluate.__doc__ or "").split("\n")[0], "exports": ["evaluate_effigy_file", "evaluate_tier1", "evaluate_all"]},
+        "effigy.evaluate": {"doc": (effigy.evaluate.__doc__ or "").split("\n")[0], "exports": ["evaluate_effigy_file", "evaluate_tier1", "evaluate_all", "wrong_bleed_score", "voice_drift_score", "compliance_check", "evaluate_generation"]},
+        "effigy.validators": {"doc": (effigy.validators.__doc__ or "").split("\n")[0], "exports": ["RegexValidator", "ValidationViolation", "validate", "strip_violations", "validators_from_ast", "has_blocking_violation", "revise_if_violated"]},
         "effigy.metrics": {"doc": (effigy.metrics.__doc__ or "").split("\n")[0], "exports": ["measure_character", "CorpusMetrics"]},
         "effigy.corpus": {"doc": (effigy.corpus.__doc__ or "").split("\n")[0], "exports": ["load_corpus", "CharacterSpec"]},
         "effigy.discovery": {"doc": (effigy.discovery.__doc__ or "").split("\n")[0], "exports": ["run_discovery"]},

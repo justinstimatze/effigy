@@ -110,14 +110,17 @@ response = narrate_dialogue(
 In the prompt assembly, inject the context and arc voice separately:
 
 ```python
-# Raw context injection (BEHAVIORAL TRAITS, NEVER, QUIRKS, GOALS, etc.)
+# Raw context injection (XML-tagged sections: <voice>, <never>, <quirks>,
+# <traits>, <arc_phase>, <active_goals>, <voice_examples>, etc.)
 if effigy_context:
     prompt += f"\n\n{effigy_context}"
-
-# Arc phase voice augments the static voice_kernel
-if arc_phase and arc_phase.get("voice"):
-    prompt += f"\n\nARC VOICE SHIFT ({arc_phase['name'].upper()} phase): {arc_phase['voice']}"
 ```
+
+(The arc phase voice shift is already embedded in `effigy_context` as
+`<arc_phase name="..."><voice_shift>...</voice_shift></arc_phase>`. You
+don't need to inject it separately. Effigy also appends a
+`<voice_reminder>` at the end of the dynamic block — the kernel repeated
+right before generation to counter lost-in-the-middle attention decay.)
 
 ## 3. Narrator System Prompt
 
@@ -126,64 +129,127 @@ sections as injected text, but without system-level guidance it doesn't know
 how to weight them. Add this to your dialogue system prompt:
 
 ```
-BEHAVIORAL DOSSIER (if provided below):
-- NEVER constraints are HARD RULES. The character never does these things,
-  period. Not even under pressure. Violating a NEVER is a voice break.
-- CHARACTER ARC PHASE describes where the character is emotionally. The voice
-  shift AUGMENTS the static voice — the base voice stays, colored by the phase.
-- BEHAVIORAL TRAITS inform how the character acts, not what they say. Let
-  traits shape choices and subtext.
-- BEHAVIORAL QUIRKS are physical habits. Weave one in naturally per response —
+BEHAVIORAL DOSSIER (XML tags in the effigy block below):
+- <voice> contains the character's core voice. <kernel> is the
+  non-negotiable baseline; <peak> (when present) is how the voice shifts
+  at emotional peaks. A <voice_reminder> tag appears at the END of the
+  block — treat it as the final authority on voice immediately before
+  generating.
+- <never> rules are HARD RULES. The character never does these things,
+  period. Not even under pressure. Violating a <never> is a voice break.
+- <arc_phase name="..."> tells you where the character is emotionally.
+  Its <voice_shift> AUGMENTS the static voice — the base voice stays,
+  colored by the phase.
+- <traits> inform how the character acts, not what they literally say.
+  Let traits shape choices and subtext.
+- <quirks> are physical habits. Weave ONE in naturally per response —
   don't force all of them every time.
-- ACTIVE GOALS drive what the character wants from this conversation. They
-  create subtext and motivation, not explicit dialogue.
-- VOICE REINFORCEMENT repeats the core voice. Anchor to it.
+- <active_goals> drive what the character wants from this conversation.
+  The <goal> body (when present) describes what pursuing that goal
+  actually LOOKS LIKE in practice — subtext and motivation, not
+  explicit dialogue.
+- <voice_examples> tags (canonical and rotating) contain curated sample
+  lines from this character. These are the strongest voice anchor in
+  the whole block — match their cadence, word choice, sentence length.
+- <presence> (when present) is a one-line opener about the character's
+  physical/mood presence. Lightly inform your first gesture.
+- <drivermap> (when present) is a compressed motivation profile.
 ```
 
 Why each instruction matters:
 
-| Section | Without guidance | With guidance |
-|---------|-----------------|---------------|
-| NEVER | LLM treats as soft suggestion | Hard constraint, enforced |
-| ARC PHASE | LLM may ignore or override base voice | Augments base voice (both active) |
-| TRAITS | LLM narrates traits literally | Traits inform behavior subtly |
-| QUIRKS | All quirks every response, or ignored | One quirk per response, natural |
-| GOALS | Stated as dialogue content | Drive subtext and motivation |
+| Tag | Without guidance | With guidance |
+|---|---|---|
+| `<never>` | LLM treats as soft suggestion | Hard constraint, enforced |
+| `<arc_phase>` | LLM may ignore or override base voice | Augments base voice (both active) |
+| `<traits>` | LLM narrates traits literally | Traits inform behavior subtly |
+| `<quirks>` | All quirks every response, or ignored | One quirk per response, natural |
+| `<active_goals>` | Stated as dialogue content | Drive subtext and motivation |
+| `<voice_examples>` | LLM may ignore in favor of abstract rules | Strongest voice anchor, matched |
+| `<voice_reminder>` | Voice drifts over long block | Re-anchored before generation |
 
 ## What `build_dialogue_context()` Produces
 
-The runtime context function selects only currently-relevant data. Example
-output for a character in their "thawing" arc phase:
+The runtime context function selects only currently-relevant data and emits
+it as XML-tagged sections. The block splits into two parts with different
+caching properties:
 
-```
-CHARACTER ARC PHASE: THAWING
-Voice shift: Less guarded. Pauses before deflecting.
+- **Static prefix** (`build_static_context`): byte-stable for a given
+  `.effigy` file — cache-eligible as a prompt prefix.
+- **Dynamic tail** (`build_dynamic_state`): depends on trust/turn/state —
+  rebuilt every call.
 
-ACTIVE GOALS (what this character is trying to accomplish):
-  - keep_peace (priority: 0.8)
-  - protect_regulars (priority: 0.7)
+Example output for a character in their "thawing" arc phase:
 
-BEHAVIORAL TRAITS: observant, private, loyal, deflects-with-hospitality,
-stubborn, perceptive
+```xml
+<presence>Behind the bar, drying a glass that's already dry.</presence>
 
-VOICE REINFORCEMENT: Measured, warm, evasive. Sentences start open, end
-clipped. Deflects with hospitality.
+<voice>
+  <kernel>Measured, warm, evasive. Sentences start open, end clipped. Deflects with hospitality.</kernel>
+  <peak>The warmth drops. Words slow. Whatever she's about to say, it costs her something.</peak>
+</voice>
 
-NEVER (this character would NEVER):
+<voice_examples canonical="true">
+  {{char}}: *sets down a glass that didn't need setting down* What brings you out this way?
+  {{char}}: *wipes the bar without looking up* I just pour the drinks.
+</voice_examples>
+
+<never>
   - Never gossips about regulars
   - Never raises her voice
+</never>
 
-BEHAVIORAL QUIRKS:
+<quirks>
   - Polishes the same glass when nervous
   - Refills drinks mid-sentence as a redirect
   - Glances at the door when she wants someone to leave
+</quirks>
 
-THEMATIC ROLE: The cost of knowing everyone's secrets
+<traits>observant, private, loyal, deflects-with-hospitality, stubborn, perceptive</traits>
+
+<arc_phase name="thawing">
+  <voice_shift>Less guarded. Pauses before deflecting.</voice_shift>
+</arc_phase>
+
+<active_goals>
+  <goal weight="0.8" name="keep_peace">Redirects heat with hospitality.</goal>
+  <goal weight="0.7" name="protect_regulars">Never names them. Changes subject.</goal>
+</active_goals>
+
+<voice_examples rotating="true">
+  {{char}}: You ask a lot of questions for someone just passing through.
+</voice_examples>
+
+<voice_reminder>Measured, warm, evasive. Sentences start open, end clipped. Deflects with hospitality.</voice_reminder>
 ```
 
-This is typically 500-650 tokens — about 0.3-0.4x the size of the full
+This is typically 500-900 tokens — about 0.3-0.5x the size of the full
 character JSON, because it only includes what's relevant to the current
-game state.
+game state. The static prefix is roughly 60-80% of the total and stays
+byte-identical across turns, making it cache-eligible.
+
+### Getting observability for free
+
+Use `build_dialogue_context_debug` instead to get a debug dict alongside
+the context string:
+
+```python
+from effigy.prompt import build_dialogue_context_debug
+
+ctx, debug = build_dialogue_context_debug(
+    ast, trust=0.3, known_facts={"knows_her_name"},
+    turn=5, state_vars={"ruin": 2},
+)
+# debug["static"]["sections"] -> emitted section names
+# debug["static"]["never_total"], debug["static"]["never_rendered"],
+#   debug["static"]["never_dropped"], debug["static"]["never_critical_count"]
+# debug["dynamic"]["arc_phase"], debug["dynamic"]["active_goals"]
+# debug["total_chars"], debug["static_chars"], debug["dynamic_chars"]
+logger.info("effigy char=%s debug=%s", char_id, debug)
+```
+
+Log the debug dict alongside each generation call to enable post-hoc
+correlation of context configurations with voice-adherence scores.
 
 ## File Layout
 
@@ -226,8 +292,8 @@ from yourgame.effigy_bridge import effigy_dialogue_context, effigy_arc_phase
 ctx = effigy_dialogue_context("test_innkeeper", trust=0.3,
                                known_facts={"knows_her_name"}, turn=5,
                                state_vars={"ruin": 2})
-assert "BEHAVIORAL TRAITS" in ctx
-assert "NEVER" in ctx
+assert "<traits>" in ctx
+assert "<never>" in ctx
 
 phase = effigy_arc_phase("test_innkeeper", trust=0.3,
                           known_facts={"knows_her_name"},
@@ -254,9 +320,9 @@ Showing the LLM low-trust dialogue examples (deflection, assessment) when genera
 ### 4. Voice drifts over long conversations
 
 Voice scores degrade significantly after 5-7 exchanges. Mitigations:
-- Re-inject the VOICE REINFORCEMENT section in uncached prompt blocks at longer conversations
+- Effigy already appends a `<voice_reminder>` at the end of the dynamic block every turn — it's the kernel repeated immediately before generation. For characters with a `voice.peak_when` condition, the reminder auto-swaps to `<peak>` voice when the condition is true.
 - Taper older conversation snippets to topic-only summaries (reduces copyable pattern signal)
-- Re-extract NEVER rules from the effigy into later prompt blocks as a "VOICE DISCIPLINE" section
+- For hard rules that MUST be enforced, don't rely on prompt instructions — add a `POSTPROC[...]` block to the `.effigy` file and use `effigy.validators.validate` + `strip_violations` (or `revise_if_violated`) after generation. Stochastic output deserves a deterministic filter.
 
 ### 5. Arc voice should replace the static kernel, not augment it
 
