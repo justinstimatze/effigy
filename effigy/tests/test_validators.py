@@ -6,6 +6,7 @@ from effigy.validators import (
     RegexValidator,
     ValidationViolation,
     has_blocking_violation,
+    revise_if_violated,
     strip_violations,
     validate,
     validators_from_ast,
@@ -224,3 +225,107 @@ class TestPostprocParser:
         ast = parse(text)
         assert len(ast.post_processors) == 1
         assert ast.post_processors[0].rule_id  # non-empty
+
+
+class TestReviseIfViolated:
+    def setup_method(self):
+        self.ast = parse(POSTPROC_NOTATION)
+
+    def test_returns_original_when_no_violations(self):
+        calls: list[str] = []
+
+        def fake_llm(feedback: str) -> str:
+            calls.append(feedback)
+            return "should never run"
+
+        text = "nothing to see here"
+        result, violations = revise_if_violated(
+            text, self.ast, llm_call=fake_llm, max_retries=1
+        )
+        assert result == text
+        assert calls == []
+        assert violations == []
+
+    def test_retries_once_on_blocking_violation(self):
+        calls: list[str] = []
+
+        def fake_llm(feedback: str) -> str:
+            calls.append(feedback)
+            return "clean text now"
+
+        bad_text = "he was waiting for exactly this moment"
+        result, violations = revise_if_violated(
+            bad_text, self.ast, llm_call=fake_llm, max_retries=1
+        )
+        assert len(calls) == 1
+        assert "hank_cinematic" in calls[0]
+        assert result == "clean text now"
+        # Second validation against clean text -> no blocking violations.
+        assert not any(v.action == "reject" for v in violations)
+
+    def test_max_retries_zero_returns_original_and_violations(self):
+        def fake_llm(feedback: str) -> str:
+            raise AssertionError("llm should not be called when max_retries=0")
+
+        bad_text = "he was waiting for exactly this"
+        result, violations = revise_if_violated(
+            bad_text, self.ast, llm_call=fake_llm, max_retries=0
+        )
+        assert result == bad_text
+        assert any(v.action == "reject" for v in violations)
+
+    def test_exhausted_retries_returns_last_attempt(self):
+        calls: list[str] = []
+
+        def fake_llm(feedback: str) -> str:
+            calls.append(feedback)
+            # Keeps producing the same blocking violation forever.
+            return "still waiting for exactly this"
+
+        result, violations = revise_if_violated(
+            "waiting for exactly nothing",
+            self.ast,
+            llm_call=fake_llm,
+            max_retries=2,
+        )
+        assert len(calls) == 2
+        # Final result is the last thing the LLM returned.
+        assert result == "still waiting for exactly this"
+        # And its violations are still surfaced to the caller.
+        assert any(v.action == "reject" for v in violations)
+
+    def test_feedback_includes_rule_id_and_matched_text(self):
+        captured: list[str] = []
+
+        def fake_llm(feedback: str) -> str:
+            captured.append(feedback)
+            return "clean"
+
+        revise_if_violated(
+            "he was waiting for exactly the right moment",
+            self.ast,
+            llm_call=fake_llm,
+            max_retries=1,
+        )
+        assert len(captured) == 1
+        fb = captured[0]
+        assert "hank_cinematic" in fb
+        assert "waiting for exactly" in fb
+
+    def test_only_reject_violations_trigger_retry(self):
+        """Warn-only violations should not cause a retry loop."""
+        calls: list[str] = []
+
+        def fake_llm(feedback: str) -> str:
+            calls.append(feedback)
+            return "changed"
+
+        # 'analyze the data' hits the 'data' warn rule but no reject rule.
+        text = "analyze the data carefully"
+        result, violations = revise_if_violated(
+            text, self.ast, llm_call=fake_llm, max_retries=1
+        )
+        assert calls == []  # no retry happened
+        assert result == text
+        # But the warn violation is still reported.
+        assert any(v.severity == "warn" for v in violations)
