@@ -86,6 +86,16 @@ class TestVoice:
         ast = parse(text)
         assert ast.voice.kernel == "Just a kernel."
         assert ast.voice.peak == ""
+        assert ast.voice.peak_when == ""
+
+    def test_parse_voice_peak_when(self):
+        text = (
+            "@id x\nVOICE{\n  kernel: k.\n  peak: p.\n"
+            "  peak_when: ruin>=4 or trust>=0.8\n}\n"
+        )
+        ast = parse(text)
+        assert ast.voice.peak == "p."
+        assert ast.voice.peak_when == "ruin>=4 or trust>=0.8"
 
 
 class TestMesExamples:

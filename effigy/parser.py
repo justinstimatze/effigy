@@ -242,11 +242,12 @@ def _parse_kv_block(content: str) -> dict[str, str]:
 
 
 def _parse_voice_block(content: str) -> VoiceAST:
-    """Parse VOICE{kernel: ..., peak: ...}."""
+    """Parse VOICE{kernel: ..., peak: ..., peak_when: ...}."""
     kv = _parse_kv_block(content)
     return VoiceAST(
         kernel=kv.get("kernel", ""),
         peak=kv.get("peak", ""),
+        peak_when=kv.get("peak_when", ""),
     )
 
 

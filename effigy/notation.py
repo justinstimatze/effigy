@@ -65,10 +65,12 @@ class NarrativeRole(Enum):
 
 @dataclass
 class VoiceAST:
-    """Voice kernel + optional peak voice."""
+    """Voice kernel + optional peak voice + peak activation condition."""
 
     kernel: str  # the non-negotiable voice description
     peak: str = ""  # voice shift near emotional peaks
+    peak_when: str = ""  # condition DSL string; when true, peak replaces kernel
+    #                     in <voice_reminder>. Evaluated via resolve_condition.
 
 
 @dataclass

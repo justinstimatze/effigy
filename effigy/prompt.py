@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 # ALL rules less effective (constraint saturation).
 MAX_NEVER_RULES = 7
 
+# Number of MES examples rendered as the "canonical" cache-stable slice.
+# These are the first N entries from notation, always shown, no rotation.
+# The remaining MES examples rotate in the dynamic block.
+CANONICAL_MES_COUNT = 2
+
+# Max MES examples shown in the rotating dynamic slice.
+MAX_ROTATING_MES = 2
+
 # Try to import an optional external condition evaluator. Falls back to legacy
 # dict-based evaluation if not installed (effigy standalone use).
 try:
@@ -290,6 +298,105 @@ def select_mes_examples(
     return selected
 
 
+def select_canonical_mes(ast: CharacterAST) -> list[str]:
+    """Return the first CANONICAL_MES_COUNT MES examples, no rotation, no trust gate.
+
+    These are cache-stable — byte-identical across turns and trust levels.
+    Authors should order their MES block so the most universal examples
+    come first.
+    """
+    results: list[str] = []
+    for ex in ast.mes_examples[:CANONICAL_MES_COUNT]:
+        text = ex.text if hasattr(ex, "text") else ex
+        results.append(text)
+    return results
+
+
+def select_rotating_mes(
+    ast: CharacterAST,
+    turn: int,
+    *,
+    trust: float = 0.0,
+    max_examples: int = MAX_ROTATING_MES,
+) -> list[str]:
+    """Return trust-gated, turn-rotated MES examples EXCLUDING the canonical slice.
+
+    Operates on ast.mes_examples[CANONICAL_MES_COUNT:]. The rotating slice
+    is dynamic state — changes with turn/trust. Use in build_dynamic_state.
+    """
+    candidates = ast.mes_examples[CANONICAL_MES_COUNT:]
+    if not candidates:
+        return []
+
+    if trust >= 0.5:
+        allowed = {"high", "moderate", "any"}
+    elif trust >= 0.2:
+        allowed = {"low", "moderate", "any"}
+    else:
+        allowed = {"low", "any"}
+
+    pool: list[str] = []
+    for ex in candidates:
+        if hasattr(ex, "tier"):
+            if ex.tier in allowed:
+                pool.append(ex.text)
+        else:
+            pool.append(ex)
+
+    if not pool:
+        return []
+    if len(pool) <= max_examples:
+        return pool
+
+    offset = turn % len(pool)
+    return [pool[(offset + i) % len(pool)] for i in range(max_examples)]
+
+
+def _evaluate_condition_string(
+    cond_str: str,
+    trust: float,
+    state_vars: dict[str, float] | None,
+    known_facts: set[str] | None,
+    char_id: str = "",
+) -> bool:
+    """Evaluate a standalone condition DSL string (e.g., voice.peak_when).
+
+    Returns False when the external conditions library is unavailable or
+    the condition fails to parse. Used for non-arc-phase conditions that
+    need to reuse the same DSL.
+    """
+    if not cond_str:
+        return False
+    state_vars = state_vars or {}
+    known_facts = known_facts or set()
+    if _HAS_CONDITIONS:
+        resolved = cond_str.replace("_NPC_", char_id) if char_id else cond_str
+        try:
+            state = _EffigyConditionState(trust, state_vars, known_facts, char_id)
+            return bool(_cond_evaluate(resolved, state))
+        except Exception:
+            logger.debug("condition string parse failed for %r", resolved)
+            return False
+    return False
+
+
+def _compress_drivermap_profile(profile: dict[str, str]) -> str:
+    """Compress a drivermap profile dict to a short one-liner.
+
+    {"evidence": "+", "conflict": "-"} -> "evidence+, conflict-"
+    """
+    parts: list[str] = []
+    for k, v in profile.items():
+        v = (v or "").strip()
+        if v in ("+", "-"):
+            parts.append(f"{k}{v}")
+        elif v == "neutral" or not v:
+            parts.append(f"{k}=")
+        else:
+            parts.append(f"{k}:{v}")
+    return ", ".join(parts)
+
+
 def build_static_context(ast: CharacterAST) -> str:
     """Turn-invariant character definition — the cacheable prefix.
 
@@ -302,9 +409,29 @@ def build_static_context(ast: CharacterAST) -> str:
     """
     sections: list[str] = []
 
-    # --- Voice reinforcement (primary steering) ---
+    # --- Presence note (brief physical/mood opener) ---
+    if ast.presence_note:
+        sections.append(f"<presence>{ast.presence_note}</presence>")
+
+    # --- Voice (kernel + optional peak + peak_when condition) ---
     if ast.voice and ast.voice.kernel:
-        sections.append(f"<voice>\n  <kernel>{ast.voice.kernel}</kernel>\n</voice>")
+        voice_lines = ["<voice>", f"  <kernel>{ast.voice.kernel}</kernel>"]
+        if ast.voice.peak:
+            peak_attr = ""
+            if ast.voice.peak_when:
+                peak_attr = f' when="{ast.voice.peak_when}"'
+            voice_lines.append(f"  <peak{peak_attr}>{ast.voice.peak}</peak>")
+        voice_lines.append("</voice>")
+        sections.append("\n".join(voice_lines))
+
+    # --- Canonical voice examples (cache-stable MES slice) ---
+    canonical_mes = select_canonical_mes(ast)
+    if canonical_mes:
+        ex_lines = ['<voice_examples canonical="true">']
+        for ex in canonical_mes:
+            ex_lines.append(f"  {ex}")
+        ex_lines.append("</voice_examples>")
+        sections.append("\n".join(ex_lines))
 
     # --- Never-would-say constraints (capped, prioritized) ---
     # Sort `CRITICAL:`-prefixed rules first, then cap at MAX_NEVER_RULES.
@@ -338,6 +465,12 @@ def build_static_context(ast: CharacterAST) -> str:
     if ast.traits:
         sections.append(f"<traits>{', '.join(ast.traits)}</traits>")
 
+    # --- Drivermap profile (structured motivation) ---
+    if ast.drivermap and ast.drivermap.profile:
+        compressed = _compress_drivermap_profile(ast.drivermap.profile)
+        if compressed:
+            sections.append(f"<drivermap>{compressed}</drivermap>")
+
     return "\n\n".join(sections)
 
 
@@ -348,14 +481,21 @@ def build_dynamic_state(
     known_facts: set[str] | None = None,
     turn: int = 0,
     state_vars: dict[str, float] | None = None,
+    uncertain: bool = False,
 ) -> str:
     """Per-turn state context — recomputed every generation call.
 
     This section depends on trust, turn, known_facts, and state_vars.
     It must come after build_static_context() in the final prompt so
     the static prefix remains cache-eligible.
+
+    Args:
+        uncertain: When True, emit <uncertainty_voice> examples. The
+            caller should set this when the player input has question/
+            hedge signals the character won't confidently answer.
     """
     known_facts = known_facts or set()
+    state_vars = state_vars or {}
     sections: list[str] = []
 
     # --- Arc phase ---
@@ -367,7 +507,7 @@ def build_dynamic_state(
         phase_lines.append("</arc_phase>")
         sections.append("\n".join(phase_lines))
 
-    # --- Active goals ---
+    # --- Active goals (spliced with goal_behaviors when available) ---
     goals = resolve_active_goals(ast, trust, known_facts=known_facts, state_vars=state_vars)
     active_goals = [g for g in goals if g["active"]]
     if active_goals:
@@ -376,15 +516,53 @@ def build_dynamic_state(
             attrs = f'weight="{g["weight"]:.1f}"'
             if g.get("grows_with"):
                 attrs += f' grows_with="{g["grows_with"]}"'
-            goal_lines.append(f'  <goal {attrs}>{g["name"]}</goal>')
+            name = g["name"]
+            behavior = ast.goal_behaviors.get(name, "")
+            if behavior:
+                goal_lines.append(
+                    f'  <goal {attrs} name="{name}">{behavior}</goal>'
+                )
+            else:
+                goal_lines.append(f'  <goal {attrs} name="{name}"/>')
         goal_lines.append("</active_goals>")
         sections.append("\n".join(goal_lines))
 
+    # --- Rotating voice examples (trust-gated, turn-rotated) ---
+    rotating_mes = select_rotating_mes(ast, turn, trust=trust)
+    if rotating_mes:
+        ex_lines = ['<voice_examples rotating="true">']
+        for ex in rotating_mes:
+            ex_lines.append(f"  {ex}")
+        ex_lines.append("</voice_examples>")
+        sections.append("\n".join(ex_lines))
+
+    # --- Uncertainty voice (opt-in via kwarg) ---
+    if uncertain and ast.uncertainty_voice:
+        unc_lines = ["<uncertainty_voice>"]
+        for ex in ast.uncertainty_voice:
+            unc_lines.append(f"  {ex}")
+        unc_lines.append("</uncertainty_voice>")
+        sections.append("\n".join(unc_lines))
+
     # --- Voice reminder (sandwich: last thing before generation) ---
-    # Counters lost-in-the-middle by putting the voice kernel immediately
-    # before the generation point. One line; high attention cost/benefit.
+    # Counters lost-in-the-middle. Swaps to voice.peak when peak_when
+    # condition evaluates true; otherwise uses kernel.
     if ast.voice and ast.voice.kernel:
-        sections.append(f"<voice_reminder>{ast.voice.kernel}</voice_reminder>")
+        active_voice = ast.voice.kernel
+        peak_active = False
+        if ast.voice.peak and ast.voice.peak_when:
+            char_id = getattr(ast, "char_id", "") or getattr(ast, "name", "") or ""
+            if _evaluate_condition_string(
+                ast.voice.peak_when,
+                trust,
+                state_vars,
+                known_facts,
+                char_id=char_id,
+            ):
+                active_voice = ast.voice.peak
+                peak_active = True
+        attr = ' peak="true"' if peak_active else ""
+        sections.append(f"<voice_reminder{attr}>{active_voice}</voice_reminder>")
 
     return "\n\n".join(sections)
 
@@ -395,6 +573,7 @@ def build_dialogue_context(
     known_facts: set[str] | None = None,
     turn: int = 0,
     state_vars: dict[str, float] | None = None,
+    uncertain: bool = False,
 ) -> str:
     """Build the complete effigy context for injection into a dialogue system.
 
@@ -410,6 +589,7 @@ def build_dialogue_context(
         known_facts: Set of fact IDs the player has discovered.
         turn: Current turn number (for MES example rotation).
         state_vars: Arbitrary numeric state variables (e.g., {"ruin": 4}).
+        uncertain: When True, emit uncertainty-voice examples (opt-in).
     """
     static = build_static_context(ast)
     dynamic = build_dynamic_state(
@@ -418,6 +598,7 @@ def build_dialogue_context(
         known_facts=known_facts,
         turn=turn,
         state_vars=state_vars,
+        uncertain=uncertain,
     )
     parts = [p for p in (static, dynamic) if p]
     return "\n\n".join(parts)

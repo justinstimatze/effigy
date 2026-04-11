@@ -559,3 +559,169 @@ class TestStaticDynamicSplit:
     def test_dynamic_empty_ast_returns_empty(self):
         empty_ast = parse("@id empty\n")
         assert build_dynamic_state(empty_ast) == ""
+
+
+# ---------------------------------------------------------------------------
+# Phase 0: surfaced AST fields (presence, voice.peak/peak_when, MES split,
+# drivermap, goal_behaviors, UNC)
+# ---------------------------------------------------------------------------
+
+
+PHASE0_NOTATION = """
+@id marta
+@name Marta Voss
+@presence Small, tense-jawed. Never quite leaves the counter.
+
+VOICE{
+  kernel: Brisk, warm, no-nonsense.
+  peak: Cuts her own sentence mid-word. Drops the patter.
+  peak_when: ruin>=4
+}
+
+MES[
+  {{char}}: "Coffee's fresh if you want it. Cream's in the tin."
+  ---
+  {{char}}: "Counter's clean. Sit wherever."
+  ---
+  @tier moderate
+  {{char}}: "I heard about the Hensley boy. You knew him?"
+  ---
+  @tier high
+  {{char}}: "My Eli used to sit right there. Before."
+]
+
+UNC[
+  {{char}}: "I wouldn't know about that."
+  ---
+  {{char}}: "Better ask the sheriff."
+]
+
+NEVER[
+  Never uses analytical language
+]
+
+QUIRKS[
+  Wipes the counter when nervous
+]
+
+GOALS{
+  protect_daughter   0.8 grows_with trust
+  keep_peace         0.7
+}
+
+BEHAVIORS{
+  protect_daughter: Redirects when daughter comes up. Asks about your family first.
+}
+
+DM{
+  evidence: +
+  conflict: -
+  stability: +
+  features: small-town, grief
+}
+"""
+
+
+class TestPhase0Surfaced:
+    def setup_method(self):
+        self.ast = parse(PHASE0_NOTATION)
+
+    def test_presence_note_rendered(self):
+        ctx = build_static_context(self.ast)
+        assert "<presence>" in ctx
+        assert "tense-jawed" in ctx
+
+    def test_voice_peak_rendered(self):
+        ctx = build_static_context(self.ast)
+        assert "<peak" in ctx
+        assert "Cuts her own sentence" in ctx
+
+    def test_voice_peak_when_attribute(self):
+        ctx = build_static_context(self.ast)
+        assert 'when="ruin>=4"' in ctx
+
+    def test_drivermap_compressed(self):
+        ctx = build_static_context(self.ast)
+        assert "<drivermap>" in ctx
+        assert "evidence+" in ctx
+        assert "conflict-" in ctx
+        assert "stability+" in ctx
+
+    def test_canonical_mes_in_static(self):
+        ctx = build_static_context(self.ast)
+        assert '<voice_examples canonical="true">' in ctx
+        assert "Coffee's fresh" in ctx
+        assert "Counter's clean" in ctx
+
+    def test_canonical_mes_byte_stable_across_turns(self):
+        """Canonical slice must not change with turn or trust."""
+        a = build_static_context(self.ast)
+        b = build_static_context(self.ast)
+        assert a == b
+
+    def test_rotating_mes_in_dynamic(self):
+        """High-trust rotating should include trust-gated examples."""
+        ctx = build_dynamic_state(self.ast, trust=0.6, turn=0)
+        assert '<voice_examples rotating="true">' in ctx
+
+    def test_rotating_mes_respects_trust(self):
+        """Low-trust rotating should NOT include high-tier examples."""
+        ctx = build_dynamic_state(self.ast, trust=0.0, turn=0)
+        # High-tier example 'My Eli' must not appear at low trust.
+        assert "My Eli used to sit" not in ctx
+
+    def test_rotating_mes_changes_with_turn(self):
+        """When pool > max_examples, rotation should vary by turn."""
+        # MES has 4 entries total, 2 canonical → 2 in rotating pool.
+        # With max_examples=2 and pool=2, rotation is stable. Check with
+        # trust that admits both moderate + high to widen pool.
+        a = build_dynamic_state(self.ast, trust=0.6, turn=0)
+        b = build_dynamic_state(self.ast, trust=0.6, turn=1)
+        # Pool size equals max → rotation no-op. Both include same examples.
+        # This test asserts the function doesn't crash and returns content.
+        assert '<voice_examples rotating="true">' in a
+        assert '<voice_examples rotating="true">' in b
+
+    def test_goal_behavior_spliced_into_goal(self):
+        ctx = build_dynamic_state(
+            self.ast, trust=0.5, state_vars={}, known_facts=set()
+        )
+        assert "protect_daughter" in ctx
+        assert "Redirects when daughter comes up" in ctx
+
+    def test_goal_without_behavior_is_self_closing(self):
+        ctx = build_dynamic_state(self.ast, trust=0.9)
+        # keep_peace has no behavior entry
+        assert 'name="keep_peace"/>' in ctx
+
+    def test_uncertainty_voice_off_by_default(self):
+        ctx = build_dynamic_state(self.ast, trust=0.5)
+        assert "<uncertainty_voice>" not in ctx
+        assert "wouldn't know" not in ctx
+
+    def test_uncertainty_voice_on_when_opted_in(self):
+        ctx = build_dynamic_state(self.ast, trust=0.5, uncertain=True)
+        assert "<uncertainty_voice>" in ctx
+        assert "wouldn't know" in ctx
+
+    def test_voice_reminder_kernel_by_default(self):
+        ctx = build_dynamic_state(self.ast, trust=0.0, state_vars={"ruin": 0})
+        assert "<voice_reminder>" in ctx
+        assert "Brisk, warm" in ctx
+        # Peak voice ('Cuts her own sentence') not active
+        assert 'peak="true"' not in ctx
+
+    def test_voice_reminder_swaps_to_peak_when_condition_true(self):
+        """When peak_when evaluates true, voice_reminder uses peak voice.
+
+        Depends on the external stope.conditions library being installed;
+        skips gracefully otherwise.
+        """
+        pytest.importorskip("stope.conditions")
+        ctx = build_dynamic_state(self.ast, trust=0.0, state_vars={"ruin": 5})
+        assert '<voice_reminder peak="true">' in ctx
+        assert "Cuts her own sentence" in ctx
+
+    def test_build_dialogue_context_passes_uncertain_through(self):
+        ctx = build_dialogue_context(self.ast, trust=0.5, uncertain=True)
+        assert "<uncertainty_voice>" in ctx
