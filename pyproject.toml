@@ -2,7 +2,7 @@
 name = "effigy"
 version = "0.3.1"
 description = "Dense character notation for LLM-driven NPCs — compact behavioral dossiers with trust-gated content, arc phases, and emotional evolution"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = []
 license = "MIT"
 authors = [
