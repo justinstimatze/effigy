@@ -145,6 +145,28 @@ class TestExpand:
         assert parsed["char_id"] == "test_npc"
 
 
+class TestExpandGoalBehaviors:
+    def test_goal_behaviors_serialized(self):
+        text = """
+@id x
+GOALS{
+  keep_peace 0.9
+}
+BEHAVIORS{
+  keep_peace: Deflects with hospitality.
+}
+"""
+        ast = parse(text)
+        result = expand(ast)
+        assert result["goal_behaviors"]["keep_peace"] == "Deflects with hospitality."
+
+    def test_empty_goal_behaviors_not_in_output(self):
+        text = "@id x\nGOALS{\n  keep_peace 0.9\n}\n"
+        ast = parse(text)
+        result = expand(ast)
+        assert "goal_behaviors" not in result
+
+
 # ---------------------------------------------------------------------------
 # Roundtrip: .effigy → AST → JSON, compare to original JSON
 # ---------------------------------------------------------------------------

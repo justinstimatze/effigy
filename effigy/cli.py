@@ -80,6 +80,7 @@ def cmd_compile(args: argparse.Namespace) -> None:
     print(f"  Departure lines: {len(ast.departure_lines)}")
     print(f"  Wrong examples: {len(ast.wrong_examples)}")
     print(f"  Props: {len(ast.props)}")
+    print(f"  Goal behaviors: {len(ast.goal_behaviors)}")
 
     # Validate: MES examples should not contradict NEVER rules
     warnings = _check_mes_never_contradictions(ast)

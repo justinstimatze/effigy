@@ -186,6 +186,11 @@ class CharacterAST:
     arc_phases: list[ArcPhaseAST] = field(default_factory=list)
     goals: list[GoalAST] = field(default_factory=list)
 
+    # Goal behaviors: maps goal name -> behavioral description of what the
+    # character does when that goal is active. Surfaces in intentions_context
+    # so the LLM knows what an active intention looks like in practice.
+    goal_behaviors: dict[str, str] = field(default_factory=dict)
+
     # Secrets
     secrets: list[SecretAST] = field(default_factory=list)
 
@@ -234,6 +239,7 @@ BLOCK_KEYWORDS = {
     "DEPART",
     "WRONG",
     "PROPS",
+    "BEHAVIORS",
 }
 
 HEADER_PREFIXES = {

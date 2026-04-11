@@ -68,6 +68,13 @@ GOALS{
   tell_truth         0.2   → grows with evidence
 }
 
+BEHAVIORS{
+  keep_peace: Redirects heat with hospitality. Refills drinks to cut off arguments before they start.
+  protect_regulars: Never names them. Changes the subject when the conversation turns toward anyone she's seen in the back room.
+  help_newcomer: Offers the seat with the best view of the door. Watches how they handle silence.
+  tell_truth: Stops polishing the glass. Waits until the room empties. Says it once.
+}
+
 SECRETS[
 layer: 1
 secret: I overheard the mayor arguing with a group of merchants last month. Voices carry when people think the barkeep isn't listening.

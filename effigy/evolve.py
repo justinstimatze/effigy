@@ -103,6 +103,8 @@ def compute_emotional_state(
     emotional_inputs: dict[str, float] | None = None,
     loss_keywords: set[str] | None = None,
     archetype_sensitivities: dict[str, dict[str, list[str]]] | None = None,
+    arc_phase_name: str = "",
+    phase_modifiers: dict[str, dict[str, float]] | None = None,
 ) -> EmotionalState:
     """Derive emotional state from world state and archetype sensitivities.
 
@@ -116,6 +118,13 @@ def compute_emotional_state(
         loss_keywords: Substrings to match against known_facts for grief.
             Defaults to generic keywords: death, die, kill, collapse.
         archetype_sensitivities: Override the example sensitivity mappings.
+        arc_phase_name: Current arc phase name. Used to look up phase_modifiers.
+            Callers should resolve the phase via resolve_arc_phase() first.
+        phase_modifiers: Per-phase multipliers applied to emotional axis
+            outputs. Structure: ``{phase_name: {axis_name: multiplier}}``.
+            Lets you model suppression (guarded phase) vs. release (resolved
+            phase) of the same emotional input. Values are clamped to [0.0, 1.0]
+            after multiplication.
     """
     known_facts = known_facts or set()
     _loss_kw = loss_keywords if loss_keywords is not None else DEFAULT_LOSS_KEYWORDS
@@ -140,55 +149,121 @@ def compute_emotional_state(
     }
     input_values.update(emotional_inputs or {})
 
+    # Per-phase modifiers (suppression in guarded, release in resolved, etc.)
+    active_modifiers: dict[str, float] = {}
+    if phase_modifiers and arc_phase_name:
+        active_modifiers = phase_modifiers.get(arc_phase_name, {}) or {}
+
     # Compute each axis based on archetype sensitivities
     for axis in ("fear", "guilt", "curiosity", "grief", "resolve"):
         inputs = sensitivities.get(axis, [])
         if not inputs:
             continue
         value = max((input_values.get(inp, 0.0) for inp in inputs), default=0.0)
+        if axis in active_modifiers:
+            value = max(0.0, min(1.0, value * active_modifiers[axis]))
         setattr(state, axis, round(value, 2))
 
     return state
 
 
-def emotional_context(state: EmotionalState, name: str) -> str:
+DEFAULT_EMOTIONAL_PROSE: dict[str, dict[str, str]] = {
+    "fear_high": "deeply unsettled — fight-or-flight proximity",
+    "fear_low": "on edge, watchful",
+    "guilt_high": "the weight of complicity is becoming unbearable",
+    "guilt_low": "uneasy conscience, deflecting",
+    "curiosity_high": "intensely engaged — leaning in, asking questions",
+    "curiosity_low": "interested, cautiously drawn in",
+    "grief_high": "grief is surfacing — pauses, physical stillness",
+    "grief_low": "touching on old wounds, careful",
+    "resolve_high": "decided — clarity replacing ambiguity",
+    "resolve_low": "building toward a decision",
+}
+
+EMOTIONAL_THRESHOLD = 0.2
+EMOTIONAL_HIGH = 0.6
+
+
+VALID_AXES = frozenset({"fear", "guilt", "curiosity", "grief", "resolve"})
+
+
+def emotional_context(
+    state: EmotionalState,
+    name: str,
+    *,
+    archetype: str = "",
+    prose_override: dict[str, dict[str, str]] | None = None,
+    composite_states: dict | None = None,
+) -> str:
     """Generate natural-language emotional context for prompt injection.
 
     Only includes axes above threshold (0.2) to avoid noise.
-    Returns "" if all axes are below threshold.
+    Returns "" if all axes are below threshold and no composite fires.
+
+    Args:
+        archetype: Character archetype for prose override lookup. Lets you
+            vary the emotional vocabulary per character type — a guardian's
+            fear reads differently than an innkeeper's.
+        prose_override: Per-archetype prose strings. Structure:
+            ``{archetype: {"fear_high": "...", "fear_low": "...", ...}}``.
+            Keys are ``{axis}_high`` and ``{axis}_low``. Missing entries
+            fall through to DEFAULT_EMOTIONAL_PROSE.
+        composite_states: Multi-axis composite prose. Keys are iterables of
+            axis names (tuples, lists, frozensets all work — order-independent);
+            values are prose strings that replace the individual lines when
+            ALL axes in the set are above threshold. Lets you express that
+            fear+guilt together is qualitatively different from either alone
+            (e.g., ``{("fear","guilt"): "cornered — wants to confess but afraid"}``).
     """
-    THRESHOLD = 0.2
     lines: list[str] = []
+    archetype_prose = (prose_override or {}).get(archetype, {}) if archetype else {}
 
-    if state.fear > THRESHOLD:
-        if state.fear > 0.6:
-            lines.append("deeply unsettled — fight-or-flight proximity")
-        else:
-            lines.append("on edge, watchful")
+    def _prose(axis: str, level: str) -> str:
+        key = f"{axis}_{level}"
+        return archetype_prose.get(key) or DEFAULT_EMOTIONAL_PROSE.get(key, "")
 
-    if state.guilt > THRESHOLD:
-        if state.guilt > 0.6:
-            lines.append("the weight of complicity is becoming unbearable")
-        else:
-            lines.append("uneasy conscience, deflecting")
+    # Identify which axes are currently above threshold.
+    active_axes: set[str] = set()
+    for axis in ("fear", "guilt", "curiosity", "grief", "resolve"):
+        if getattr(state, axis) > EMOTIONAL_THRESHOLD:
+            active_axes.add(axis)
 
-    if state.curiosity > THRESHOLD:
-        if state.curiosity > 0.6:
-            lines.append("intensely engaged — leaning in, asking questions")
-        else:
-            lines.append("interested, cautiously drawn in")
+    # Composite states: when multiple axes are simultaneously active,
+    # replace their individual lines with the composite prose.
+    # Larger composites match first (fear+guilt+grief beats fear+guilt).
+    # Normalize keys to frozensets so callers can pass tuples/lists/sets.
+    consumed_axes: set[str] = set()
+    if composite_states:
+        normalized: list[tuple[frozenset[str], str]] = []
+        for key, prose in composite_states.items():
+            axis_set = frozenset(key)
+            unknown = axis_set - VALID_AXES
+            if unknown:
+                logger.warning(
+                    "composite_states key contains unknown axis name(s) %s; "
+                    "valid axes are %s. This composite will never fire.",
+                    sorted(unknown), sorted(VALID_AXES),
+                )
+                continue
+            normalized.append((axis_set, prose))
+        normalized.sort(key=lambda kv: -len(kv[0]))
+        for axis_set, prose in normalized:
+            if not axis_set.issubset(active_axes):
+                continue
+            if axis_set & consumed_axes:
+                continue  # some axis already claimed by a larger composite
+            lines.append(prose)
+            consumed_axes |= axis_set
 
-    if state.grief > THRESHOLD:
-        if state.grief > 0.6:
-            lines.append("grief is surfacing — pauses, physical stillness")
-        else:
-            lines.append("touching on old wounds, careful")
-
-    if state.resolve > THRESHOLD:
-        if state.resolve > 0.6:
-            lines.append("decided — clarity replacing ambiguity")
-        else:
-            lines.append("building toward a decision")
+    # Individual axis lines for axes not consumed by any composite.
+    for axis in ("fear", "guilt", "curiosity", "grief", "resolve"):
+        if axis in consumed_axes or axis not in active_axes:
+            continue
+        value = getattr(state, axis)
+        level = "high" if value > EMOTIONAL_HIGH else "low"
+        prose = _prose(axis, level)
+        if prose:
+            lines.append(prose)
 
     if not lines:
         return ""
@@ -226,12 +301,14 @@ def compute_intentions(
     """
     known_facts = known_facts or set()
     goals = resolve_active_goals(ast, trust, known_facts=known_facts, state_vars=state_vars)
+    behaviors = ast.goal_behaviors or {}
     intentions = []
     for g in goals:
         if g["active"]:
             intentions.append(ActiveIntention(
                 goal_name=g["name"],
                 weight=g["weight"],
+                description=behaviors.get(g["name"], ""),
             ))
     return intentions
 
@@ -239,13 +316,20 @@ def compute_intentions(
 def intentions_context(intentions: list[ActiveIntention], name: str) -> str:
     """Generate prompt context for active intentions.
 
+    If an intention has a ``description`` (populated from the effigy's
+    BEHAVIORS block), the description is included on an indented line
+    so the LLM knows what the intention looks like in practice.
+
     Returns "" if no active intentions.
     """
     if not intentions:
         return ""
 
-    lines = [f"  - {i.goal_name} (priority: {i.weight:.1f})"
-             for i in intentions[:3]]
+    lines: list[str] = []
+    for i in intentions[:3]:
+        lines.append(f"  - {i.goal_name} (priority: {i.weight:.1f})")
+        if i.description:
+            lines.append(f"      behavior: {i.description}")
     return (
         f"ACTIVE INTENTIONS ({name} is currently trying to):\n"
         + "\n".join(lines)
@@ -389,6 +473,10 @@ def build_evolution_context(
     synthesis_text: str = "",
     archetype_sensitivities: dict[str, dict[str, list[str]]] | None = None,
     loss_keywords: set[str] | None = None,
+    arc_phase_name: str = "",
+    phase_modifiers: dict[str, dict[str, float]] | None = None,
+    prose_override: dict[str, dict[str, str]] | None = None,
+    composite_states: dict[frozenset[str], str] | None = None,
 ) -> str:
     """Build the complete Layer 3 evolution context.
 
@@ -396,6 +484,10 @@ def build_evolution_context(
     into a single string for prompt injection.
 
     No LLM calls — synthesis_text must be pre-generated and passed in.
+
+    Args:
+        arc_phase_name, phase_modifiers: See compute_emotional_state.
+        prose_override, composite_states: See emotional_context.
     """
     known_facts = known_facts or set()
     sections: list[str] = []
@@ -409,8 +501,15 @@ def build_evolution_context(
         emotional_inputs=emotional_inputs,
         archetype_sensitivities=archetype_sensitivities,
         loss_keywords=loss_keywords,
+        arc_phase_name=arc_phase_name,
+        phase_modifiers=phase_modifiers,
     )
-    emo_ctx = emotional_context(emo_state, name)
+    emo_ctx = emotional_context(
+        emo_state, name,
+        archetype=ast.archetype,
+        prose_override=prose_override,
+        composite_states=composite_states,
+    )
     if emo_ctx:
         sections.append(emo_ctx)
 

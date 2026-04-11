@@ -126,6 +126,8 @@ def expand(ast: CharacterAST) -> dict:
         result["quirks"] = list(ast.quirks)
     if ast.theme:
         result["theme"] = ast.theme
+    if ast.goal_behaviors:
+        result["goal_behaviors"] = dict(ast.goal_behaviors)
 
     return result
 

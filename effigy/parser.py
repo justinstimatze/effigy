@@ -596,6 +596,19 @@ def _parse_rels_block(content: str) -> list[RelationshipAST]:
     return rels
 
 
+def _parse_behaviors_block(content: str) -> dict[str, str]:
+    """Parse BEHAVIORS{goal_name: behavior description, ...}.
+
+    Maps goal names (matching GOALS entries) to behavioral descriptions
+    of what the character does when that goal is active. Used by
+    intentions_context to give the LLM concrete guidance on what an
+    active intention looks like in practice.
+
+    Supports multiline values (continuation lines indented under the key).
+    """
+    return _parse_kv_block(content)
+
+
 def _parse_sched_block(content: str) -> ScheduleAST:
     """Parse SCHED{morning: loc, afternoon: loc, ...}."""
     kv = _parse_kv_block(content)
@@ -803,6 +816,10 @@ def parse(text: str) -> CharacterAST:
             state.advance(len(word))
             content = _read_bracketed_block(state)
             ast.props = _parse_lines_block(content)
+        elif word == "BEHAVIORS":
+            state.advance(len(word))
+            content = _read_braced_block(state)
+            ast.goal_behaviors = _parse_behaviors_block(content)
         else:
             # Unknown — skip line
             state.skip_line()

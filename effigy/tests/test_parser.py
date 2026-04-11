@@ -328,6 +328,38 @@ class TestArrivalDeparture:
         assert len(ast.departure_lines) == 1
 
 
+class TestBehaviors:
+    def test_parse_behaviors(self):
+        text = """
+@id x
+BEHAVIORS{
+  keep_peace: Redirects heat with hospitality.
+  protect_regulars: Never names them directly.
+}
+"""
+        ast = parse(text)
+        assert ast.goal_behaviors["keep_peace"] == "Redirects heat with hospitality."
+        assert ast.goal_behaviors["protect_regulars"] == "Never names them directly."
+
+    def test_empty_behaviors(self):
+        text = "@id x\nBEHAVIORS{\n}\n"
+        ast = parse(text)
+        assert ast.goal_behaviors == {}
+
+    def test_multiline_behavior_value(self):
+        text = """
+@id x
+BEHAVIORS{
+  keep_peace: Redirects heat with hospitality.
+    Refills drinks to cut off arguments.
+}
+"""
+        ast = parse(text)
+        # Continuation lines are appended to the previous key's value
+        assert "Redirects heat" in ast.goal_behaviors["keep_peace"]
+        assert "Refills drinks" in ast.goal_behaviors["keep_peace"]
+
+
 class TestNeverWouldSay:
     def test_parse_never(self):
         text = """@id x

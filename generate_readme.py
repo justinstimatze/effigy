@@ -122,6 +122,7 @@ def _extract_facts(ast, raw_text: str) -> dict:
             ("UNC[]", "Uncertainty/deflection responses"),
             ("ARC{}", "Trust/fact/state-variable-gated arc phases"),
             ("GOALS{}", "Weighted goals, some grow with trust/evidence"),
+            ("BEHAVIORS{}", "Goal-name → behavioral description (what active goals look like)"),
             ("SECRETS[]", "Layered secrets with reveal conditions"),
             ("RELS{}", "Directed NPC relationship graph"),
             ("PROPS[]", "Concrete grounding objects"),
