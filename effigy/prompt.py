@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import re
 from typing import Any
 
 from effigy.notation import (
@@ -23,9 +24,40 @@ from effigy.notation import (
 logger = logging.getLogger(__name__)
 
 # Max NEVER rules surfaced in generation context. LLMs reliably attend
-# to ~5-7 constraints during generation; beyond that, adding rules makes
-# ALL rules less effective (constraint saturation).
-MAX_NEVER_RULES = 7
+# to ~5-7 constraints of roughly equal weight; 10 is a pragmatic upper
+# bound given that effigy also strips inline examples from NEVER rules
+# (see _strip_inline_examples), which shrinks the effective weight of
+# each constraint. The saturation research assumes equal-length rules;
+# after stripping inline WRONG/RIGHT/NOT/YES blocks, rules are short
+# enough that 10 fits the same attention budget as 7 bloated ones.
+MAX_NEVER_RULES = 10
+
+# Markers authors conventionally use to embed inline examples inside a
+# NEVER rule. Case-sensitive (uppercase only) — lowercase 'wrong' in
+# prose is fine. Matches `WRONG:`, `RIGHT:`, `NOT:`, `YES:`, `BAD:`,
+# `GOOD:`, `EXAMPLE:`, `EX:`, `BEFORE:`, `AFTER:`.
+_INLINE_EXAMPLE_MARKERS = re.compile(
+    r"\b(?:WRONG|RIGHT|NOT|YES|BAD|GOOD|EXAMPLE|EX|BEFORE|AFTER)\s*:"
+)
+
+
+def _strip_inline_examples(rule: str) -> str:
+    """Remove inline WRONG/RIGHT/NOT/YES example text from a NEVER rule.
+
+    Inline examples in NEVER rules have the same LLM-priming problem as
+    standalone WRONG blocks: the model pattern-matches on the example
+    text regardless of the negative label. Stripping keeps the
+    constraint statement and drops the anti-examples.
+
+    Authors who want inline examples mark them with uppercase prefixes
+    (``WRONG:``, ``RIGHT:``, ``NOT:``, ``YES:``, ``BAD:``, ``GOOD:``,
+    ``EXAMPLE:``, etc.). Prose that happens to use these words in
+    lowercase is unaffected.
+    """
+    m = _INLINE_EXAMPLE_MARKERS.search(rule)
+    if not m:
+        return rule
+    return rule[: m.start()].rstrip(" \n\t-—–:;,.").rstrip()
 
 # Number of MES examples rendered as the "canonical" cache-stable slice.
 # These are the first N entries from notation, always shown, no rotation.
@@ -456,20 +488,28 @@ def build_static_context(
         if _debug is not None:
             _debug["mes_canonical_count"] = len(canonical_mes)
 
-    # --- Never-would-say constraints (capped, prioritized) ---
+    # --- Never-would-say constraints (capped, prioritized, stripped) ---
     # Sort `CRITICAL:`-prefixed rules first, then cap at MAX_NEVER_RULES.
+    # Strip inline WRONG/RIGHT/NOT/YES example blocks from each rule
+    # (same priming problem as standalone WRONG examples).
     if ast.never_would_say:
         critical = [n for n in ast.never_would_say if n.upper().startswith("CRITICAL:")]
         regular = [n for n in ast.never_would_say if not n.upper().startswith("CRITICAL:")]
         prioritized = (critical + regular)[:MAX_NEVER_RULES]
-        never_lines = [f"  - {n}" for n in prioritized]
+        stripped = [_strip_inline_examples(n) for n in prioritized]
+        # Drop rules that became empty after stripping (authoring error).
+        stripped = [s for s in stripped if s]
+        never_lines = [f"  - {n}" for n in stripped]
         sections.append("<never>\n" + "\n".join(never_lines) + "\n</never>")
         dbg_sections.append("never")
         if _debug is not None:
             _debug["never_total"] = len(ast.never_would_say)
-            _debug["never_rendered"] = len(prioritized)
-            _debug["never_dropped"] = len(ast.never_would_say) - len(prioritized)
+            _debug["never_rendered"] = len(stripped)
+            _debug["never_dropped"] = len(ast.never_would_say) - len(stripped)
             _debug["never_critical_count"] = len(critical)
+            _debug["never_inline_examples_stripped"] = sum(
+                1 for p, s in zip(prioritized, stripped) if p != s
+            )
 
     # --- Observable quirks ---
     if ast.quirks:

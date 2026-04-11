@@ -479,6 +479,12 @@ NEVER[
   Regular rule seven
   ---
   Regular rule eight
+  ---
+  Regular rule nine
+  ---
+  Regular rule ten
+  ---
+  Regular rule eleven
 ]
 """
 
@@ -487,10 +493,13 @@ class TestNeverPriority:
     def setup_method(self):
         self.ast = parse(PRIORITY_NOTATION)
 
-    def test_never_capped_at_seven(self):
+    def test_never_capped_at_max(self):
+        from effigy.prompt import MAX_NEVER_RULES
+
         ctx = build_dialogue_context(self.ast)
         never_count = ctx.count("  - ")
-        assert never_count == 7
+        assert never_count == MAX_NEVER_RULES
+        assert MAX_NEVER_RULES == 10  # explicit to catch unintended changes
 
     def test_critical_rules_first(self):
         ctx = build_dialogue_context(self.ast)
@@ -502,7 +511,95 @@ class TestNeverPriority:
 
     def test_all_rules_still_on_ast(self):
         """AST preserves all rules -- cap is output-only."""
-        assert len(self.ast.never_would_say) == 10
+        assert len(self.ast.never_would_say) == 13
+
+    def test_rules_beyond_cap_dropped(self):
+        """With 13 rules and cap=10, 3 regular rules should be truncated."""
+        ctx = build_dialogue_context(self.ast)
+        # First 8 regular rules (after 2 CRITICALs consume 2 slots) should
+        # appear; rules 9/10/11 should be dropped.
+        assert "Regular rule one" in ctx
+        assert "Regular rule eight" in ctx
+        assert "Regular rule nine" not in ctx
+        assert "Regular rule ten" not in ctx
+        assert "Regular rule eleven" not in ctx
+
+
+INLINE_EXAMPLES_NOTATION = """
+@id test_inline
+@name Test Inline
+
+NEVER[
+  CRITICAL: Never goes coy or terse. Fills silence. WRONG: "I don't know." WRONG: "Maybe." RIGHT: "So here's the thing — you're gonna love this — I've got a story."
+  ---
+  Never uses academic language
+  ---
+  Never interrogates the player. NOT: "Which one?" NOT: "What do you mean?" YES: redirect with hospitality
+]
+"""
+
+
+class TestStripInlineExamples:
+    """Phase 7: inline WRONG/RIGHT/NOT/YES examples stripped from NEVER rules."""
+
+    def test_strip_helper_removes_wrong_marker(self):
+        from effigy.prompt import _strip_inline_examples
+
+        result = _strip_inline_examples(
+            'Never goes coy. WRONG: "I don\'t know." RIGHT: "Sure thing."'
+        )
+        assert result == "Never goes coy"
+
+    def test_strip_helper_removes_not_yes_markers(self):
+        from effigy.prompt import _strip_inline_examples
+
+        result = _strip_inline_examples(
+            'Never interrogates. NOT: "Which one?" YES: redirect'
+        )
+        assert result == "Never interrogates"
+
+    def test_strip_helper_handles_bad_good_markers(self):
+        from effigy.prompt import _strip_inline_examples
+
+        result = _strip_inline_examples(
+            "Never lies about age. BAD: says 30 when 45. GOOD: says 40-ish."
+        )
+        assert result == "Never lies about age"
+
+    def test_strip_helper_no_markers_unchanged(self):
+        from effigy.prompt import _strip_inline_examples
+
+        rule = "Never raises her voice — volume is a loss of control"
+        assert _strip_inline_examples(rule) == rule
+
+    def test_strip_helper_lowercase_markers_ignored(self):
+        from effigy.prompt import _strip_inline_examples
+
+        rule = "Never tells a customer they're wrong: it's bad for tips"
+        # Lowercase 'wrong:' must NOT match — only uppercase markers.
+        assert _strip_inline_examples(rule) == rule
+
+    def test_rendered_never_has_no_inline_examples(self):
+        ast = parse(INLINE_EXAMPLES_NOTATION)
+        ctx = build_dialogue_context(ast)
+        # The NEVER section should contain the constraint statements but
+        # not the inline example text.
+        assert "Never goes coy" in ctx
+        assert "Never interrogates the player" in ctx
+        # Example markers and their quoted strings must be stripped.
+        assert "WRONG:" not in ctx
+        assert "RIGHT:" not in ctx
+        assert "NOT:" not in ctx
+        assert "YES:" not in ctx
+        assert "I don't know" not in ctx
+        assert "Which one?" not in ctx
+        assert "redirect with hospitality" not in ctx
+
+    def test_debug_counts_inline_stripped(self):
+        ast = parse(INLINE_EXAMPLES_NOTATION)
+        _, debug = build_dialogue_context_debug(ast)
+        # 2 of the 3 rules had inline example markers.
+        assert debug["static"]["never_inline_examples_stripped"] == 2
 
 
 class TestStaticDynamicSplit:
@@ -780,8 +877,8 @@ class TestDebugDict:
     def test_debug_never_counts(self):
         _, debug = build_dialogue_context_debug(parse(PRIORITY_NOTATION))
         s = debug["static"]
-        assert s["never_total"] == 10
-        assert s["never_rendered"] == 7
+        assert s["never_total"] == 13
+        assert s["never_rendered"] == 10
         assert s["never_dropped"] == 3
         assert s["never_critical_count"] == 2
 
