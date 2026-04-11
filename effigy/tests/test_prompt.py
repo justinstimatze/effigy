@@ -525,6 +525,55 @@ class TestNeverPriority:
         assert "Regular rule eleven" not in ctx
 
 
+class TestValidateNeverBudget:
+    """v0.3.2: authoring-time visibility into NEVER rules dropped at the cap."""
+
+    def test_under_cap_returns_empty(self):
+        from effigy.prompt import validate_never_budget
+
+        ast = parse("@id u\n@name U\nNEVER[\n  one\n  ---\n  two\n]\n")
+        assert validate_never_budget(ast) == []
+
+    def test_at_cap_returns_empty(self):
+        from effigy.prompt import MAX_NEVER_RULES, validate_never_budget
+
+        rules = "\n  ---\n  ".join(f"rule {i}" for i in range(MAX_NEVER_RULES))
+        ast = parse(f"@id a\n@name A\nNEVER[\n  {rules}\n]\n")
+        assert validate_never_budget(ast) == []
+
+    def test_over_cap_reports_dropped(self):
+        from effigy.prompt import validate_never_budget
+
+        warnings = validate_never_budget(parse(PRIORITY_NOTATION))
+        assert len(warnings) == 1
+        w = warnings[0]
+        assert w["char_id"] == "test_priority"
+        assert w["total"] == 13
+        assert w["cap"] == 10
+        assert w["critical_count"] == 2
+        assert w["dropped"] == [
+            "Regular rule nine",
+            "Regular rule ten",
+            "Regular rule eleven",
+        ]
+
+    def test_dropped_matches_render(self):
+        """validate_never_budget must agree with build_dialogue_context."""
+        from effigy.prompt import build_dialogue_context, validate_never_budget
+
+        ast = parse(PRIORITY_NOTATION)
+        ctx = build_dialogue_context(ast)
+        warnings = validate_never_budget(ast)
+        for rule in warnings[0]["dropped"]:
+            assert rule not in ctx
+
+    def test_no_never_block_returns_empty(self):
+        from effigy.prompt import validate_never_budget
+
+        ast = parse("@id n\n@name N\n")
+        assert validate_never_budget(ast) == []
+
+
 INLINE_EXAMPLES_NOTATION = """
 @id test_inline
 @name Test Inline

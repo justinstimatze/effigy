@@ -2,6 +2,7 @@
 
 Usage:
     python -m effigy.cli compile <file.effigy>     # parse and validate
+    python -m effigy.cli validate <file.effigy>    # check NEVER budget + warnings
     python -m effigy.cli expand <file.effigy>      # expand to JSON
     python -m effigy.cli evaluate <file.effigy> <original.json>  # roundtrip fidelity
     python -m effigy.cli metrics <effigy_dir> <corpus_dir>       # compression metrics
@@ -88,6 +89,51 @@ def cmd_compile(args: argparse.Namespace) -> None:
         print(f"\n  WARNINGS ({len(warnings)}):")
         for w in warnings:
             print(f"    ! {w}")
+
+
+def cmd_validate(args: argparse.Namespace) -> None:
+    """Validate a .effigy file: NEVER budget + MES/NEVER contradictions."""
+    from effigy.parser import ParseError, parse
+    from effigy.prompt import validate_never_budget
+
+    path = Path(args.file)
+    if not path.exists():
+        print(f"File not found: {path}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        ast = parse(path.read_text(encoding="utf-8"))
+    except ParseError as e:
+        print(f"Parse error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    had_warning = False
+
+    for w in validate_never_budget(ast):
+        had_warning = True
+        n_dropped = len(w["dropped"])
+        print(
+            f"WARNING: {w['char_id']} has {w['total']} NEVER rules "
+            f"(cap is {w['cap']})."
+        )
+        print(f"  {n_dropped} rule{'s' if n_dropped != 1 else ''} will be dropped at generation time.")
+        print("  Dropped rules (by priority order):")
+        for i, rule in enumerate(w["dropped"], start=w["cap"] + 1):
+            preview = rule if len(rule) <= 80 else rule[:77] + "..."
+            print(f"    [{i}] {preview}")
+        print("  Consider: consolidate related rules, or promote critical ones with CRITICAL: prefix.")
+
+    contradictions = _check_mes_never_contradictions(ast)
+    for warning in contradictions:
+        had_warning = True
+        print(f"WARNING: {warning}")
+
+    if not had_warning:
+        print(f"OK: {ast.char_id} ({len(ast.never_would_say)} NEVER rules, within cap)")
+        return
+
+    if args.strict:
+        sys.exit(1)
 
 
 def cmd_expand(args: argparse.Namespace) -> None:
@@ -236,6 +282,16 @@ def main():
     p_compile = subparsers.add_parser("compile", help="Parse and validate")
     p_compile.add_argument("file", help=".effigy file path")
 
+    # validate
+    p_validate = subparsers.add_parser(
+        "validate", help="Validate authoring constraints (NEVER budget, MES/NEVER conflicts)"
+    )
+    p_validate.add_argument("file", help=".effigy file path")
+    p_validate.add_argument(
+        "--strict", action="store_true",
+        help="Exit with code 1 if any warnings are reported",
+    )
+
     # expand
     p_expand = subparsers.add_parser("expand", help="Expand to JSON")
     p_expand.add_argument("file", help=".effigy file path")
@@ -269,6 +325,7 @@ def main():
 
     commands = {
         "compile": cmd_compile,
+        "validate": cmd_validate,
         "expand": cmd_expand,
         "context": cmd_context,
         "evaluate": cmd_evaluate,

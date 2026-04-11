@@ -59,6 +59,34 @@ def _strip_inline_examples(rule: str) -> str:
         return rule
     return rule[: m.start()].rstrip(" \n\t-—–:;,.").rstrip()
 
+def validate_never_budget(ast: CharacterAST) -> list[dict[str, Any]]:
+    """Report NEVER rules that exceed the per-character cap.
+
+    Returns one warning dict per character whose ``never_would_say`` list is
+    longer than ``MAX_NEVER_RULES``. Each warning carries the rule texts that
+    would be silently dropped at generation time, in the same priority order
+    used by ``build_dialogue_context`` (CRITICAL-prefixed first, then the rest
+    in declaration order).
+
+    Empty list if the character is within budget.
+    """
+    if not ast.never_would_say:
+        return []
+    critical = [n for n in ast.never_would_say if n.upper().startswith("CRITICAL:")]
+    regular = [n for n in ast.never_would_say if not n.upper().startswith("CRITICAL:")]
+    prioritized = critical + regular
+    if len(prioritized) <= MAX_NEVER_RULES:
+        return []
+    dropped = prioritized[MAX_NEVER_RULES:]
+    return [{
+        "char_id": ast.char_id,
+        "total": len(prioritized),
+        "cap": MAX_NEVER_RULES,
+        "critical_count": len(critical),
+        "dropped": dropped,
+    }]
+
+
 # Number of MES examples rendered as the "canonical" cache-stable slice.
 # These are the first N entries from notation, always shown, no rotation.
 # The remaining MES examples rotate in the dynamic block.

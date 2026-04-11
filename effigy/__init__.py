@@ -9,7 +9,7 @@ compressed symbols into three layers:
            emotional axes, intentions, memory synthesis.
 """
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 from effigy.notation import CharacterAST, NarrativeRole
 from effigy.parser import ParseError, parse
