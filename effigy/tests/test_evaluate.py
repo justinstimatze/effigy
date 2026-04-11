@@ -214,3 +214,140 @@ class TestRealFileEvaluation:
         for fs in result.field_scores:
             if fs.field_name in ("char_id", "name", "role"):
                 assert fs.score == 1.0, f"{fs.field_name}: {fs.details}"
+
+
+# ---------------------------------------------------------------------------
+# Generation-quality metrics (Phase 6)
+# ---------------------------------------------------------------------------
+
+from effigy.evaluate import (  # noqa: E402
+    compliance_check,
+    evaluate_generation,
+    voice_drift_score,
+    wrong_bleed_score,
+)
+from effigy.parser import parse  # noqa: E402
+
+METRICS_NOTATION = """
+@id marta
+@name Marta
+
+VOICE{
+  kernel: Brisk, warm, no-nonsense.
+}
+
+MES[
+  {{char}}: "Coffee's fresh if you want it."
+  ---
+  {{char}}: "Counter's clean. Sit wherever."
+  ---
+  {{char}}: "I heard about the Hensley boy."
+]
+
+NEVER[
+  Never uses academic language
+  ---
+  Never name-drops the sheriff
+]
+
+WRONG[
+  WRONG: "The data suggests a strong correlation."
+  RIGHT: "Something's off with those numbers."
+  WHY: academic register breaks voice.
+]
+"""
+
+
+class TestWrongBleedScore:
+    def setup_method(self):
+        self.ast = parse(METRICS_NOTATION)
+
+    def test_verbatim_wrong_example_scores_high(self):
+        gen = "Well, the data suggests a strong correlation between them."
+        score = wrong_bleed_score(gen, self.ast)
+        assert score > 0.9
+
+    def test_disjoint_text_scores_low(self):
+        gen = "Coffee's fresh. Sit wherever you like."
+        score = wrong_bleed_score(gen, self.ast)
+        assert score < 0.3
+
+    def test_empty_generated_returns_zero(self):
+        assert wrong_bleed_score("", self.ast) == 0.0
+
+    def test_empty_wrong_examples_returns_zero(self):
+        ast = parse("@id x\n")
+        assert wrong_bleed_score("anything", ast) == 0.0
+
+
+class TestVoiceDriftScore:
+    def setup_method(self):
+        self.ast = parse(METRICS_NOTATION)
+
+    def test_on_voice_text_scores_higher_than_off_voice(self):
+        on_voice = "Coffee's fresh. Counter's clean. Sit wherever."
+        off_voice = (
+            "In the interest of ontological precision I must point out the "
+            "epistemic limits of your claim."
+        )
+        s_on = voice_drift_score(on_voice, self.ast)
+        s_off = voice_drift_score(off_voice, self.ast)
+        assert s_on > s_off
+
+    def test_empty_mes_returns_zero(self):
+        ast = parse("@id x\n")
+        assert voice_drift_score("anything", ast) == 0.0
+
+    def test_empty_generated_returns_zero(self):
+        assert voice_drift_score("", self.ast) == 0.0
+
+
+class TestComplianceCheck:
+    def setup_method(self):
+        self.ast = parse(METRICS_NOTATION)
+
+    def test_runs_judge_over_every_never_rule(self):
+        calls: list[tuple[str, str]] = []
+
+        def judge(rule: str, text: str) -> bool:
+            calls.append((rule, text))
+            return "academic" in rule.lower()
+
+        result = compliance_check("some text", self.ast, judge)
+        assert len(calls) == 2  # two NEVER rules
+        violated = [r for r, v in result.items() if v]
+        assert len(violated) == 1
+        assert "academic" in violated[0].lower()
+
+    def test_empty_never_rules_returns_empty_dict(self):
+        ast = parse("@id x\n")
+        result = compliance_check("text", ast, lambda r, t: True)
+        assert result == {}
+
+
+class TestEvaluateGeneration:
+    def setup_method(self):
+        self.ast = parse(METRICS_NOTATION)
+
+    def test_returns_both_text_metrics_without_judge(self):
+        result = evaluate_generation("Coffee's fresh.", self.ast)
+        assert "wrong_bleed" in result
+        assert "voice_drift" in result
+        assert "compliance" not in result
+
+    def test_includes_compliance_when_judge_given(self):
+        result = evaluate_generation(
+            "Coffee's fresh.",
+            self.ast,
+            judge=lambda rule, text: False,
+        )
+        assert "compliance" in result
+        assert result["compliance_count"] == 0
+
+    def test_compliance_count_matches_violations(self):
+        result = evaluate_generation(
+            "anything",
+            self.ast,
+            judge=lambda rule, text: True,  # all rules violated
+        )
+        assert result["compliance_count"] == 2

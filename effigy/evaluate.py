@@ -1,21 +1,29 @@
-"""Effigy evaluation — roundtrip fidelity scoring.
+"""Effigy evaluation — roundtrip fidelity scoring + generation metrics.
 
-Three tiers:
+Roundtrip fidelity (original purpose of this module):
   Tier 1 (deterministic): Structural completeness — all fields present,
     relationships preserved, enums match. Score 0-1.
   Tier 2 (embedding): Semantic similarity on prose fields. Requires
     sentence-transformers. Score 0-1. (Future)
   Tier 3 (LLM judge): Generate dialogue from original vs expanded, judge
     voice match. Run only on best round. (Future)
+
+Generation-quality metrics (Phase 6 of the 2026-alignment plan):
+  wrong_bleed_score  — how much generated text overlaps with WRONG examples
+  voice_drift_score  — how close generated text is to MES voice exemplars
+  compliance_check   — caller-supplied LLM judge over NEVER rules
+  evaluate_generation — convenience wrapper returning all three
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from effigy.expand import expand
+from effigy.notation import CharacterAST
 from effigy.parser import parse
 
 
@@ -244,3 +252,146 @@ def evaluate_all(
         results.append(evaluate_effigy_file(effigy_file, json_file))
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Generation-quality metrics (Phase 6 of the 2026-alignment plan)
+# ---------------------------------------------------------------------------
+
+
+def _char_ngrams(text: str, n: int = 4) -> set[str]:
+    """Return set of character n-grams from text. Whitespace normalized."""
+    cleaned = " ".join(text.split()).lower()
+    if len(cleaned) < n:
+        return {cleaned} if cleaned else set()
+    return {cleaned[i : i + n] for i in range(len(cleaned) - n + 1)}
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 0.0
+    intersection = len(a & b)
+    union = len(a | b)
+    return intersection / union if union else 0.0
+
+
+def _longest_common_substring_len(a: str, b: str) -> int:
+    """Length of the longest common substring between a and b.
+
+    O(len(a) * len(b)) DP. Fine for short strings (a few hundred chars
+    each). Call sites should pass normalized, short inputs.
+    """
+    if not a or not b:
+        return 0
+    # Use a rolling 1-D array for space.
+    prev = [0] * (len(b) + 1)
+    best = 0
+    for i, ca in enumerate(a, 1):
+        curr = [0] * (len(b) + 1)
+        for j, cb in enumerate(b, 1):
+            if ca == cb:
+                curr[j] = prev[j - 1] + 1
+                if curr[j] > best:
+                    best = curr[j]
+        prev = curr
+    return best
+
+
+def wrong_bleed_score(generated: str, ast: CharacterAST) -> float:
+    """How much does the generated text bleed from a WRONG example?
+
+    Returns the max normalized longest-common-substring length over all
+    ``ast.wrong_examples`` entries. Result is in [0.0, 1.0] where 1.0
+    means the generated text contains a WRONG example verbatim (or
+    nearly so), normalized by the WRONG example's length.
+
+    Empty wrong_examples returns 0.0.
+    """
+    if not ast.wrong_examples or not generated:
+        return 0.0
+
+    gen_norm = " ".join(generated.split()).lower()
+    best = 0.0
+    for we in ast.wrong_examples:
+        if not we.wrong:
+            continue
+        wrong_norm = " ".join(we.wrong.split()).lower()
+        if not wrong_norm:
+            continue
+        lcs = _longest_common_substring_len(gen_norm, wrong_norm)
+        score = lcs / len(wrong_norm)
+        if score > best:
+            best = score
+    return best
+
+
+def voice_drift_score(generated: str, ast: CharacterAST) -> float:
+    """How similar is generated text to the character's MES voice?
+
+    Returns a char-4gram Jaccard similarity between ``generated`` and
+    the concatenation of all ``ast.mes_examples``. Higher values mean
+    the generation is more on-voice; lower means drift.
+
+    Uses character n-grams (not embeddings) to avoid runtime deps.
+    Callers wanting semantic similarity should compute their own
+    embedding-based score — the signature is stable enough to swap in.
+
+    Returns 0.0 when the character has no MES examples.
+    """
+    if not ast.mes_examples or not generated:
+        return 0.0
+
+    mes_blob_parts: list[str] = []
+    for ex in ast.mes_examples:
+        text = ex.text if hasattr(ex, "text") else ex
+        mes_blob_parts.append(text)
+    mes_blob = " ".join(mes_blob_parts)
+
+    return _jaccard(_char_ngrams(generated, 4), _char_ngrams(mes_blob, 4))
+
+
+def compliance_check(
+    generated: str,
+    ast: CharacterAST,
+    judge: Callable[[str, str], bool],
+) -> dict[str, bool]:
+    """Run an LLM-judge callable over each NEVER rule.
+
+    Args:
+        generated: the generated response to check.
+        ast: the character AST (uses ast.never_would_say).
+        judge: caller-supplied callable ``(rule, text) -> bool`` that
+            returns True when the text violates the rule. Effigy does
+            not import any LLM SDK — the caller owns the judge.
+
+    Returns a dict ``{rule_text: violated_bool}``. Empty NEVER list
+    returns an empty dict.
+    """
+    return {rule: bool(judge(rule, generated)) for rule in ast.never_would_say}
+
+
+def evaluate_generation(
+    generated: str,
+    ast: CharacterAST,
+    *,
+    judge: Callable[[str, str], bool] | None = None,
+) -> dict:
+    """Run all generation-quality metrics and return a flat dict.
+
+    Suitable for logging alongside each generation call. Includes:
+        wrong_bleed      — see wrong_bleed_score
+        voice_drift      — see voice_drift_score
+        compliance       — see compliance_check (only if judge given)
+        compliance_count — count of violated NEVER rules
+
+    Pure-text metrics are always included; compliance requires a judge.
+    """
+    metrics: dict = {
+        "wrong_bleed": wrong_bleed_score(generated, ast),
+        "voice_drift": voice_drift_score(generated, ast),
+    }
+    if judge is not None:
+        compliance = compliance_check(generated, ast, judge)
+        metrics["compliance"] = compliance
+        metrics["compliance_count"] = sum(1 for v in compliance.values() if v)
+    return metrics
