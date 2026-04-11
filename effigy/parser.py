@@ -31,6 +31,7 @@ from effigy.notation import (
     EraStateAST,
     GoalAST,
     NarrativeRole,
+    PostProcRuleAST,
     RelationshipAST,
     ScheduleAST,
     SecretAST,
@@ -597,6 +598,50 @@ def _parse_rels_block(content: str) -> list[RelationshipAST]:
     return rels
 
 
+_VALID_POSTPROC_ACTIONS = {"reject", "strip", "warn"}
+
+
+def _parse_postproc_block(content: str) -> list[PostProcRuleAST]:
+    """Parse POSTPROC[...] — deterministic post-processing rules.
+
+    Each rule is a kv item separated by ``---``:
+
+        POSTPROC[
+          action: strip
+          pattern: \\*[^*]*\\*
+          why: strip roleplay asterisks
+          id: no_asterisks
+          ---
+          action: reject
+          pattern: cinematic|waiting for exactly
+          why: Hank narrator slip
+        ]
+
+    Required fields per item: ``action`` (reject|strip|warn) and
+    ``pattern`` (regex). Optional: ``why``, ``id``. Malformed items
+    are skipped with a debug log rather than raising — a bad rule
+    should not block parsing of the rest of the character file.
+    """
+    items = _split_items(content)
+    rules: list[PostProcRuleAST] = []
+    for i, item in enumerate(items):
+        kv = _parse_kv_block(item)
+        action = kv.get("action", "").strip().lower()
+        pattern = kv.get("pattern", "").strip()
+        if action not in _VALID_POSTPROC_ACTIONS or not pattern:
+            # Skip malformed entries silently; they're authoring errors.
+            continue
+        rules.append(
+            PostProcRuleAST(
+                action=action,
+                pattern=pattern,
+                why=kv.get("why", "").strip(),
+                rule_id=kv.get("id", "").strip() or f"postproc_{i}",
+            )
+        )
+    return rules
+
+
 def _parse_behaviors_block(content: str) -> dict[str, str]:
     """Parse BEHAVIORS{goal_name: behavior description, ...}.
 
@@ -821,6 +866,10 @@ def parse(text: str) -> CharacterAST:
             state.advance(len(word))
             content = _read_braced_block(state)
             ast.goal_behaviors = _parse_behaviors_block(content)
+        elif word == "POSTPROC":
+            state.advance(len(word))
+            content = _read_bracketed_block(state)
+            ast.post_processors = _parse_postproc_block(content)
         else:
             # Unknown — skip line
             state.skip_line()

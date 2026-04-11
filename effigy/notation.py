@@ -145,6 +145,21 @@ class WrongExampleAST:
 
 
 @dataclass
+class PostProcRuleAST:
+    """A deterministic post-processing rule for generation output.
+
+    Applied by effigy.validators after the LLM produces a response, to
+    enforce character voice rules that the prompt alone can't reliably
+    enforce. Parsed from POSTPROC[...] blocks.
+    """
+
+    action: str = "warn"  # "reject" | "strip" | "warn"
+    pattern: str = ""  # regex pattern (case-insensitive by default)
+    why: str = ""  # human-readable rationale for the rule
+    rule_id: str = ""  # optional stable identifier; auto-generated if empty
+
+
+@dataclass
 class GoalAST:
     """A GOAP-compatible goal with weight."""
 
@@ -211,6 +226,9 @@ class CharacterAST:
     # Wrong examples (anti-patterns for voice drift prevention)
     wrong_examples: list[WrongExampleAST] = field(default_factory=list)
 
+    # Post-processing rules (deterministic filters applied to generation output)
+    post_processors: list[PostProcRuleAST] = field(default_factory=list)
+
     # Props -- concrete domain objects the character can reference
     props: list[str] = field(default_factory=list)
 
@@ -242,6 +260,7 @@ BLOCK_KEYWORDS = {
     "WRONG",
     "PROPS",
     "BEHAVIORS",
+    "POSTPROC",
 }
 
 HEADER_PREFIXES = {
