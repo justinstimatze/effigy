@@ -22,6 +22,11 @@ from effigy.notation import (
 
 logger = logging.getLogger(__name__)
 
+# Max NEVER rules surfaced in generation context. LLMs reliably attend
+# to ~5-7 constraints during generation; beyond that, adding rules makes
+# ALL rules less effective (constraint saturation).
+MAX_NEVER_RULES = 7
+
 # Try to import an optional external condition evaluator. Falls back to legacy
 # dict-based evaluation if not installed (effigy standalone use).
 try:
@@ -285,23 +290,74 @@ def select_mes_examples(
     return selected
 
 
-def build_dialogue_context(
+def build_static_context(ast: CharacterAST) -> str:
+    """Turn-invariant character definition — the cacheable prefix.
+
+    This section depends only on the parsed AST. No trust, no turn, no
+    state_vars. The output is byte-stable for a given AST, making it
+    eligible for prompt prefix caching (Anthropic, OpenAI, etc.).
+
+    Sections are ordered strongest-signal-first for attention:
+    voice → NEVER → quirks → props → relationships → traits.
+    """
+    sections: list[str] = []
+
+    # --- Voice reinforcement (primary steering) ---
+    if ast.voice and ast.voice.kernel:
+        sections.append(f"VOICE REINFORCEMENT: {ast.voice.kernel}")
+
+    # --- Never-would-say constraints (capped, prioritized) ---
+    # Sort `CRITICAL:`-prefixed rules first, then cap at MAX_NEVER_RULES.
+    if ast.never_would_say:
+        critical = [n for n in ast.never_would_say if n.upper().startswith("CRITICAL:")]
+        regular = [n for n in ast.never_would_say if not n.upper().startswith("CRITICAL:")]
+        prioritized = (critical + regular)[:MAX_NEVER_RULES]
+        never_lines = [f"  - {n}" for n in prioritized]
+        sections.append("NEVER (this character would NEVER):\n" + "\n".join(never_lines))
+
+    # --- Observable quirks ---
+    if ast.quirks:
+        quirk_lines = [f"  - {q}" for q in ast.quirks]
+        sections.append("BEHAVIORAL QUIRKS:\n" + "\n".join(quirk_lines))
+
+    # --- Props (concrete domain objects to reach for) ---
+    if ast.props:
+        sections.append(
+            "PROPS (concrete objects this character can reference -- "
+            "use naturally, do NOT list or info-dump):\n" + "  " + " ".join(ast.props)
+        )
+
+    # --- NPC-to-NPC relationships ---
+    if ast.relationships:
+        rel_lines = []
+        for rel in ast.relationships:
+            rel_lines.append(
+                f"  - {rel.target}: {rel.rel_type} ({rel.intensity:.1f}) -- {rel.notes}"
+            )
+        sections.append(
+            "RELATIONSHIPS (how this character feels about other NPCs):\n" + "\n".join(rel_lines)
+        )
+
+    # --- Behavioral traits (PList) ---
+    if ast.traits:
+        sections.append(f"BEHAVIORAL TRAITS: {', '.join(ast.traits)}")
+
+    return "\n\n".join(sections)
+
+
+def build_dynamic_state(
     ast: CharacterAST,
+    *,
     trust: float = 0.0,
     known_facts: set[str] | None = None,
     turn: int = 0,
     state_vars: dict[str, float] | None = None,
 ) -> str:
-    """Build the complete effigy context for injection into a dialogue system.
+    """Per-turn state context — recomputed every generation call.
 
-    Returns a string ready for injection into the narrator/dialogue prompt.
-    Returns "" if the AST has no meaningful data to contribute.
-
-    Args:
-        trust: Trust level (0.0-1.0).
-        known_facts: Set of fact IDs the player has discovered.
-        turn: Current turn number (for MES example rotation).
-        state_vars: Arbitrary numeric state variables (e.g., {"ruin": 4}).
+    This section depends on trust, turn, known_facts, and state_vars.
+    It must come after build_static_context() in the final prompt so
+    the static prefix remains cache-eligible.
     """
     known_facts = known_facts or set()
     sections: list[str] = []
@@ -329,64 +385,60 @@ def build_dialogue_context(
             "ACTIVE GOALS (what this character is trying to accomplish):\n" + "\n".join(goal_lines)
         )
 
-    # --- NPC-to-NPC relationships ---
-    if ast.relationships:
-        rel_lines = []
-        for rel in ast.relationships:
-            rel_lines.append(
-                f"  - {rel.target}: {rel.rel_type} ({rel.intensity:.1f}) -- {rel.notes}"
-            )
-        sections.append(
-            "RELATIONSHIPS (how this character feels about other NPCs):\n" + "\n".join(rel_lines)
-        )
-
-    # --- Behavioral traits (PList) ---
-    if ast.traits:
-        sections.append(f"BEHAVIORAL TRAITS: {', '.join(ast.traits)}")
-
-    # --- Voice reinforcement (drift prevention) ---
-    if ast.voice and ast.voice.kernel:
-        sections.append(f"VOICE REINFORCEMENT: {ast.voice.kernel}")
-
-    # --- Never-would-say constraints ---
-    if ast.never_would_say:
-        never_lines = [f"  - {n}" for n in ast.never_would_say]
-        sections.append("NEVER (this character would NEVER):\n" + "\n".join(never_lines))
-
-    # --- Observable quirks ---
-    if ast.quirks:
-        quirk_lines = [f"  - {q}" for q in ast.quirks]
-        sections.append("BEHAVIORAL QUIRKS:\n" + "\n".join(quirk_lines))
-
-    # --- Props (concrete domain objects to reach for) ---
-    if ast.props:
-        sections.append(
-            "PROPS (concrete objects this character can reference -- "
-            "use naturally, do NOT list or info-dump):\n" + "  " + " ".join(ast.props)
-        )
-
-    # --- Wrong examples (anti-patterns) ---
-    if ast.wrong_examples:
-        wrong_lines = []
-        for we in ast.wrong_examples:
-            entry = f'  WRONG: "{we.wrong}"'
-            if we.right:
-                entry += f'\n  RIGHT: "{we.right}"'
-            if we.why:
-                entry += f"\n  WHY: {we.why}"
-            wrong_lines.append(entry)
-        sections.append(
-            "DO NOT generate dialogue like these examples:\n" + "\n  ---\n".join(wrong_lines)
-        )
-
-    # --- Thematic representation ---
-    if ast.theme:
-        sections.append(f"THEMATIC ROLE: {ast.theme}")
-
-    if not sections:
-        return ""
-
     return "\n\n".join(sections)
+
+
+def build_dialogue_context(
+    ast: CharacterAST,
+    trust: float = 0.0,
+    known_facts: set[str] | None = None,
+    turn: int = 0,
+    state_vars: dict[str, float] | None = None,
+) -> str:
+    """Build the complete effigy context for injection into a dialogue system.
+
+    Thin wrapper over build_static_context() + build_dynamic_state().
+    Callers wanting prompt-cache wins should invoke the two builders
+    separately and place the cache boundary between them.
+
+    Returns a string ready for injection into the narrator/dialogue prompt.
+    Returns "" if the AST has no meaningful data to contribute.
+
+    Args:
+        trust: Trust level (0.0-1.0).
+        known_facts: Set of fact IDs the player has discovered.
+        turn: Current turn number (for MES example rotation).
+        state_vars: Arbitrary numeric state variables (e.g., {"ruin": 4}).
+    """
+    static = build_static_context(ast)
+    dynamic = build_dynamic_state(
+        ast,
+        trust=trust,
+        known_facts=known_facts,
+        turn=turn,
+        state_vars=state_vars,
+    )
+    parts = [p for p in (static, dynamic) if p]
+    return "\n\n".join(parts)
+
+
+def get_wrong_examples(ast: CharacterAST) -> list[dict[str, str]]:
+    """Return WRONG examples for eval/reference use.
+
+    WRONG examples are anti-patterns used by eval judges to score
+    NPC voice quality. They are intentionally excluded from
+    build_dialogue_context() because they prime LLMs to reproduce
+    the exact patterns they illustrate.
+    """
+    results: list[dict[str, str]] = []
+    for we in ast.wrong_examples:
+        entry: dict[str, str] = {"wrong": we.wrong}
+        if we.right:
+            entry["right"] = we.right
+        if we.why:
+            entry["why"] = we.why
+        results.append(entry)
+    return results
 
 
 def get_arc_phase_dict(

@@ -7,6 +7,8 @@ import pytest
 from effigy.parser import parse
 from effigy.prompt import (
     build_dialogue_context,
+    build_dynamic_state,
+    build_static_context,
     get_arc_phase_dict,
     resolve_active_goals,
     resolve_arc_phase,
@@ -262,20 +264,18 @@ class TestV02ContextSections:
         assert "counter" in self.ctx
         assert "coffee" in self.ctx
 
-    def test_includes_theme(self):
-        assert "THEMATIC ROLE" in self.ctx
-        assert "loyalty to the dead" in self.ctx
+    def test_theme_excluded_from_context(self):
+        assert "THEMATIC ROLE" not in self.ctx
 
     def test_section_ordering(self):
-        """Sections should appear in a logical order."""
-        arc_pos = self.ctx.index("CHARACTER ARC PHASE")
-        goal_pos = self.ctx.index("ACTIVE GOALS")
-        trait_pos = self.ctx.index("BEHAVIORAL TRAITS")
+        """Static prefix (voice → never → quirks → ... → traits) precedes dynamic (arc → goals)."""
         voice_pos = self.ctx.index("VOICE REINFORCEMENT")
         never_pos = self.ctx.index("NEVER")
         quirk_pos = self.ctx.index("BEHAVIORAL QUIRKS")
-        theme_pos = self.ctx.index("THEMATIC ROLE")
-        assert arc_pos < goal_pos < trait_pos < voice_pos < never_pos < quirk_pos < theme_pos
+        trait_pos = self.ctx.index("BEHAVIORAL TRAITS")
+        arc_pos = self.ctx.index("CHARACTER ARC PHASE")
+        goal_pos = self.ctx.index("ACTIVE GOALS")
+        assert voice_pos < never_pos < quirk_pos < trait_pos < arc_pos < goal_pos
 
 
 # ---------------------------------------------------------------------------
@@ -378,10 +378,10 @@ class TestRealFileContext:
         ctx = build_dialogue_context(ast)
         assert "BEHAVIORAL QUIRKS" in ctx
 
-    def test_context_has_theme(self, filename):
+    def test_context_excludes_theme(self, filename):
         ast = self._load(filename)
         ctx = build_dialogue_context(ast)
-        assert "THEMATIC ROLE" in ctx
+        assert "THEMATIC ROLE" not in ctx
 
     def test_arc_phase_dict(self, filename):
         ast = self._load(filename)
@@ -389,3 +389,162 @@ class TestRealFileContext:
         assert result is not None
         assert "name" in result
         assert "voice" in result
+
+
+WRONG_NOTATION = """
+@id test_wrong
+@name Test Wrong
+
+VOICE{
+  kernel: Brisk and warm.
+}
+
+NEVER[
+  Never uses academic language
+]
+
+WRONG[
+  WRONG: "The data suggests a correlation between the variables."
+  RIGHT: "Something's off with those numbers."
+  WHY: Academic register breaks character voice.
+  ---
+  WRONG: "I've been documenting the anomalies in my field notes."
+  RIGHT: "I wrote some stuff down."
+  WHY: Too formal for this character.
+]
+"""
+
+
+class TestWrongExclusion:
+    def setup_method(self):
+        self.ast = parse(WRONG_NOTATION)
+
+    def test_wrong_not_in_dialogue_context(self):
+        ctx = build_dialogue_context(self.ast)
+        assert "DO NOT generate" not in ctx
+        assert "WRONG" not in ctx
+        assert "data suggests" not in ctx
+        assert "field notes" not in ctx
+
+    def test_never_still_present(self):
+        ctx = build_dialogue_context(self.ast)
+        assert "NEVER" in ctx
+        assert "academic language" in ctx
+
+    def test_voice_still_present(self):
+        ctx = build_dialogue_context(self.ast)
+        assert "Brisk and warm" in ctx
+
+    def test_wrong_accessible_via_getter(self):
+        from effigy.prompt import get_wrong_examples
+
+        examples = get_wrong_examples(self.ast)
+        assert len(examples) == 2
+        assert "data suggests" in examples[0]["wrong"]
+        assert examples[0]["right"] == "Something's off with those numbers."
+        assert examples[0]["why"] == "Academic register breaks character voice."
+
+
+PRIORITY_NOTATION = """
+@id test_priority
+@name Test Priority
+
+NEVER[
+  Regular rule one
+  ---
+  Regular rule two
+  ---
+  Regular rule three
+  ---
+  Regular rule four
+  ---
+  Regular rule five
+  ---
+  Regular rule six
+  ---
+  CRITICAL: Must always do X
+  ---
+  CRITICAL: Must never do Y
+  ---
+  Regular rule seven
+  ---
+  Regular rule eight
+]
+"""
+
+
+class TestNeverPriority:
+    def setup_method(self):
+        self.ast = parse(PRIORITY_NOTATION)
+
+    def test_never_capped_at_seven(self):
+        ctx = build_dialogue_context(self.ast)
+        never_count = ctx.count("  - ")
+        assert never_count == 7
+
+    def test_critical_rules_first(self):
+        ctx = build_dialogue_context(self.ast)
+        critical_x = ctx.index("Must always do X")
+        critical_y = ctx.index("Must never do Y")
+        first_regular = ctx.index("Regular rule one")
+        assert critical_x < first_regular
+        assert critical_y < first_regular
+
+    def test_all_rules_still_on_ast(self):
+        """AST preserves all rules -- cap is output-only."""
+        assert len(self.ast.never_would_say) == 10
+
+
+class TestStaticDynamicSplit:
+    """Phase 1: build_static_context / build_dynamic_state contracts."""
+
+    def setup_method(self):
+        self.ast = parse(V02_NOTATION)
+
+    def test_static_is_byte_stable_across_state(self):
+        """Static context must not change with turn, trust, or state_vars."""
+        s_a = build_static_context(self.ast)
+        s_b = build_static_context(self.ast)
+        assert s_a == s_b
+        assert s_a  # non-empty
+
+    def test_static_contains_only_static_sections(self):
+        ctx = build_static_context(self.ast)
+        assert "VOICE REINFORCEMENT" in ctx
+        assert "NEVER" in ctx
+        assert "BEHAVIORAL QUIRKS" in ctx
+        assert "BEHAVIORAL TRAITS" in ctx
+        assert "CHARACTER ARC PHASE" not in ctx
+        assert "ACTIVE GOALS" not in ctx
+
+    def test_dynamic_contains_only_dynamic_sections(self):
+        ctx = build_dynamic_state(self.ast, trust=0.5, state_vars={"ruin": 1})
+        assert "CHARACTER ARC PHASE" in ctx
+        assert "VOICE REINFORCEMENT" not in ctx
+        assert "NEVER" not in ctx
+
+    def test_dynamic_changes_with_trust(self):
+        """Different trust levels should yield different dynamic context."""
+        arc_ast = parse(ARC_NOTATION)
+        low = build_dynamic_state(arc_ast, trust=0.0)
+        high = build_dynamic_state(
+            arc_ast, trust=0.5, known_facts={"knows_her_name", "overheard_argument"}
+        )
+        assert low != high
+        assert "GUARDED" in low
+        assert "VULNERABLE" in high
+
+    def test_dialogue_context_is_static_plus_dynamic(self):
+        """build_dialogue_context must equal static + '\\n\\n' + dynamic."""
+        static = build_static_context(self.ast)
+        dynamic = build_dynamic_state(self.ast, trust=0.5, state_vars={"ruin": 1})
+        combined = build_dialogue_context(self.ast, trust=0.5, state_vars={"ruin": 1})
+        assert combined == "\n\n".join(p for p in (static, dynamic) if p)
+
+    def test_static_empty_ast_returns_empty(self):
+        empty_ast = parse("@id empty\n")
+        assert build_static_context(empty_ast) == ""
+
+    def test_dynamic_empty_ast_returns_empty(self):
+        empty_ast = parse("@id empty\n")
+        assert build_dynamic_state(empty_ast) == ""
