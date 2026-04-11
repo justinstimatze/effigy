@@ -397,7 +397,11 @@ def _compress_drivermap_profile(profile: dict[str, str]) -> str:
     return ", ".join(parts)
 
 
-def build_static_context(ast: CharacterAST) -> str:
+def build_static_context(
+    ast: CharacterAST,
+    *,
+    _debug: dict | None = None,
+) -> str:
     """Turn-invariant character definition — the cacheable prefix.
 
     This section depends only on the parsed AST. No trust, no turn, no
@@ -405,24 +409,40 @@ def build_static_context(ast: CharacterAST) -> str:
     eligible for prompt prefix caching (Anthropic, OpenAI, etc.).
 
     Sections are ordered strongest-signal-first for attention:
-    voice → NEVER → quirks → props → relationships → traits.
+    presence → voice → voice_examples → never → quirks → props →
+    relationships → traits → drivermap.
+
+    Args:
+        _debug: Optional dict; when provided, populated with per-section
+            observability data (section names emitted, counts, truncation
+            info). Public callers should use build_dialogue_context_debug
+            rather than passing _debug directly.
     """
     sections: list[str] = []
+    dbg_sections: list[str] = []
 
     # --- Presence note (brief physical/mood opener) ---
     if ast.presence_note:
         sections.append(f"<presence>{ast.presence_note}</presence>")
+        dbg_sections.append("presence")
 
     # --- Voice (kernel + optional peak + peak_when condition) ---
     if ast.voice and ast.voice.kernel:
         voice_lines = ["<voice>", f"  <kernel>{ast.voice.kernel}</kernel>"]
+        has_peak = False
         if ast.voice.peak:
+            has_peak = True
             peak_attr = ""
             if ast.voice.peak_when:
                 peak_attr = f' when="{ast.voice.peak_when}"'
             voice_lines.append(f"  <peak{peak_attr}>{ast.voice.peak}</peak>")
         voice_lines.append("</voice>")
         sections.append("\n".join(voice_lines))
+        dbg_sections.append("voice")
+        if _debug is not None:
+            _debug["voice_kernel_chars"] = len(ast.voice.kernel)
+            _debug["has_peak"] = has_peak
+            _debug["has_peak_when"] = bool(ast.voice.peak_when)
 
     # --- Canonical voice examples (cache-stable MES slice) ---
     canonical_mes = select_canonical_mes(ast)
@@ -432,6 +452,9 @@ def build_static_context(ast: CharacterAST) -> str:
             ex_lines.append(f"  {ex}")
         ex_lines.append("</voice_examples>")
         sections.append("\n".join(ex_lines))
+        dbg_sections.append("voice_examples_canonical")
+        if _debug is not None:
+            _debug["mes_canonical_count"] = len(canonical_mes)
 
     # --- Never-would-say constraints (capped, prioritized) ---
     # Sort `CRITICAL:`-prefixed rules first, then cap at MAX_NEVER_RULES.
@@ -441,15 +464,23 @@ def build_static_context(ast: CharacterAST) -> str:
         prioritized = (critical + regular)[:MAX_NEVER_RULES]
         never_lines = [f"  - {n}" for n in prioritized]
         sections.append("<never>\n" + "\n".join(never_lines) + "\n</never>")
+        dbg_sections.append("never")
+        if _debug is not None:
+            _debug["never_total"] = len(ast.never_would_say)
+            _debug["never_rendered"] = len(prioritized)
+            _debug["never_dropped"] = len(ast.never_would_say) - len(prioritized)
+            _debug["never_critical_count"] = len(critical)
 
     # --- Observable quirks ---
     if ast.quirks:
         quirk_lines = [f"  - {q}" for q in ast.quirks]
         sections.append("<quirks>\n" + "\n".join(quirk_lines) + "\n</quirks>")
+        dbg_sections.append("quirks")
 
     # --- Props (concrete domain objects to reach for) ---
     if ast.props:
         sections.append("<props>\n  " + " ".join(ast.props) + "\n</props>")
+        dbg_sections.append("props")
 
     # --- NPC-to-NPC relationships ---
     if ast.relationships:
@@ -460,16 +491,24 @@ def build_static_context(ast: CharacterAST) -> str:
                 f'intensity="{rel.intensity:.1f}">{rel.notes}</rel>'
             )
         sections.append("<relationships>\n" + "\n".join(rel_lines) + "\n</relationships>")
+        dbg_sections.append("relationships")
+        if _debug is not None:
+            _debug["relationships_count"] = len(ast.relationships)
 
     # --- Behavioral traits (PList) ---
     if ast.traits:
         sections.append(f"<traits>{', '.join(ast.traits)}</traits>")
+        dbg_sections.append("traits")
 
     # --- Drivermap profile (structured motivation) ---
     if ast.drivermap and ast.drivermap.profile:
         compressed = _compress_drivermap_profile(ast.drivermap.profile)
         if compressed:
             sections.append(f"<drivermap>{compressed}</drivermap>")
+            dbg_sections.append("drivermap")
+
+    if _debug is not None:
+        _debug["sections"] = dbg_sections
 
     return "\n\n".join(sections)
 
@@ -482,6 +521,7 @@ def build_dynamic_state(
     turn: int = 0,
     state_vars: dict[str, float] | None = None,
     uncertain: bool = False,
+    _debug: dict | None = None,
 ) -> str:
     """Per-turn state context — recomputed every generation call.
 
@@ -493,10 +533,14 @@ def build_dynamic_state(
         uncertain: When True, emit <uncertainty_voice> examples. The
             caller should set this when the player input has question/
             hedge signals the character won't confidently answer.
+        _debug: Optional dict; when provided, populated with per-section
+            observability data. Public callers should use
+            build_dialogue_context_debug rather than passing _debug.
     """
     known_facts = known_facts or set()
     state_vars = state_vars or {}
     sections: list[str] = []
+    dbg_sections: list[str] = []
 
     # --- Arc phase ---
     phase = resolve_arc_phase(ast, trust, known_facts=known_facts, state_vars=state_vars)
@@ -506,12 +550,17 @@ def build_dynamic_state(
             phase_lines.append(f"  <voice_shift>{phase.voice}</voice_shift>")
         phase_lines.append("</arc_phase>")
         sections.append("\n".join(phase_lines))
+        dbg_sections.append("arc_phase")
+        if _debug is not None:
+            _debug["arc_phase"] = phase.name
+            _debug["arc_condition"] = phase.condition_str
 
     # --- Active goals (spliced with goal_behaviors when available) ---
     goals = resolve_active_goals(ast, trust, known_facts=known_facts, state_vars=state_vars)
     active_goals = [g for g in goals if g["active"]]
     if active_goals:
         goal_lines = ["<active_goals>"]
+        rendered_goals: list[dict] = []
         for g in active_goals[:3]:
             attrs = f'weight="{g["weight"]:.1f}"'
             if g.get("grows_with"):
@@ -524,8 +573,14 @@ def build_dynamic_state(
                 )
             else:
                 goal_lines.append(f'  <goal {attrs} name="{name}"/>')
+            rendered_goals.append(
+                {"name": name, "weight": g["weight"], "has_behavior": bool(behavior)}
+            )
         goal_lines.append("</active_goals>")
         sections.append("\n".join(goal_lines))
+        dbg_sections.append("active_goals")
+        if _debug is not None:
+            _debug["active_goals"] = rendered_goals
 
     # --- Rotating voice examples (trust-gated, turn-rotated) ---
     rotating_mes = select_rotating_mes(ast, turn, trust=trust)
@@ -535,6 +590,9 @@ def build_dynamic_state(
             ex_lines.append(f"  {ex}")
         ex_lines.append("</voice_examples>")
         sections.append("\n".join(ex_lines))
+        dbg_sections.append("voice_examples_rotating")
+        if _debug is not None:
+            _debug["mes_rotating_count"] = len(rotating_mes)
 
     # --- Uncertainty voice (opt-in via kwarg) ---
     if uncertain and ast.uncertainty_voice:
@@ -543,6 +601,7 @@ def build_dynamic_state(
             unc_lines.append(f"  {ex}")
         unc_lines.append("</uncertainty_voice>")
         sections.append("\n".join(unc_lines))
+        dbg_sections.append("uncertainty_voice")
 
     # --- Voice reminder (sandwich: last thing before generation) ---
     # Counters lost-in-the-middle. Swaps to voice.peak when peak_when
@@ -563,6 +622,16 @@ def build_dynamic_state(
                 peak_active = True
         attr = ' peak="true"' if peak_active else ""
         sections.append(f"<voice_reminder{attr}>{active_voice}</voice_reminder>")
+        dbg_sections.append("voice_reminder")
+        if _debug is not None:
+            _debug["voice_reminder_peak"] = peak_active
+
+    if _debug is not None:
+        _debug["sections"] = dbg_sections
+        _debug["uncertain"] = uncertain
+        _debug["trust"] = trust
+        _debug["turn"] = turn
+        _debug["state_vars"] = dict(state_vars)
 
     return "\n\n".join(sections)
 
@@ -602,6 +671,59 @@ def build_dialogue_context(
     )
     parts = [p for p in (static, dynamic) if p]
     return "\n\n".join(parts)
+
+
+def build_dialogue_context_debug(
+    ast: CharacterAST,
+    trust: float = 0.0,
+    known_facts: set[str] | None = None,
+    turn: int = 0,
+    state_vars: dict[str, float] | None = None,
+    uncertain: bool = False,
+) -> tuple[str, dict]:
+    """Build the dialogue context AND return a debug dict of what went in.
+
+    Returns (context_string, debug_dict). The debug dict has a stable
+    schema:
+
+    ``{
+        "static": {
+            "sections": [...], "voice_kernel_chars": N, "has_peak": bool,
+            "has_peak_when": bool, "mes_canonical_count": N,
+            "never_total": N, "never_rendered": N, "never_dropped": N,
+            "never_critical_count": N, "relationships_count": N,
+        },
+        "dynamic": {
+            "sections": [...], "arc_phase": str, "arc_condition": str,
+            "active_goals": [{"name", "weight", "has_behavior"}],
+            "mes_rotating_count": N, "voice_reminder_peak": bool,
+            "uncertain": bool, "trust": float, "turn": int,
+            "state_vars": dict,
+        },
+        "total_chars": N, "static_chars": N, "dynamic_chars": N,
+    }``
+
+    Callers should log the debug dict alongside the generation call to
+    enable post-hoc analysis of which context configurations produce
+    the best voice adherence.
+    """
+    debug: dict = {"static": {}, "dynamic": {}}
+    static = build_static_context(ast, _debug=debug["static"])
+    dynamic = build_dynamic_state(
+        ast,
+        trust=trust,
+        known_facts=known_facts,
+        turn=turn,
+        state_vars=state_vars,
+        uncertain=uncertain,
+        _debug=debug["dynamic"],
+    )
+    parts = [p for p in (static, dynamic) if p]
+    ctx = "\n\n".join(parts)
+    debug["total_chars"] = len(ctx)
+    debug["static_chars"] = len(static)
+    debug["dynamic_chars"] = len(dynamic)
+    return ctx, debug
 
 
 def get_wrong_examples(ast: CharacterAST) -> list[dict[str, str]]:

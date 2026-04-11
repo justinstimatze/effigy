@@ -7,6 +7,7 @@ import pytest
 from effigy.parser import parse
 from effigy.prompt import (
     build_dialogue_context,
+    build_dialogue_context_debug,
     build_dynamic_state,
     build_static_context,
     get_arc_phase_dict,
@@ -725,3 +726,104 @@ class TestPhase0Surfaced:
     def test_build_dialogue_context_passes_uncertain_through(self):
         ctx = build_dialogue_context(self.ast, trust=0.5, uncertain=True)
         assert "<uncertainty_voice>" in ctx
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: observability — build_dialogue_context_debug
+# ---------------------------------------------------------------------------
+
+
+class TestDebugDict:
+    def setup_method(self):
+        self.ast = parse(PHASE0_NOTATION)
+
+    def test_debug_returns_tuple(self):
+        result = build_dialogue_context_debug(self.ast)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        ctx, debug = result
+        assert isinstance(ctx, str)
+        assert isinstance(debug, dict)
+
+    def test_debug_has_required_top_level_keys(self):
+        _, debug = build_dialogue_context_debug(self.ast, trust=0.5, turn=3)
+        assert "static" in debug
+        assert "dynamic" in debug
+        assert "total_chars" in debug
+        assert "static_chars" in debug
+        assert "dynamic_chars" in debug
+        assert debug["total_chars"] == debug["static_chars"] + debug["dynamic_chars"] + 2
+        #                                                                             ^^^
+        #                                                        "\n\n" join between parts
+
+    def test_debug_static_sections_order(self):
+        _, debug = build_dialogue_context_debug(self.ast)
+        s = debug["static"]["sections"]
+        # Fixture contains: presence, voice, canonical MES, never, quirks, drivermap
+        # (no traits, no props, no relationships in PHASE0_NOTATION)
+        assert "presence" in s
+        assert "voice" in s
+        assert "voice_examples_canonical" in s
+        assert "never" in s
+        assert "quirks" in s
+        assert "drivermap" in s
+        # Order assertion: presence before voice before canonical MES
+        assert s.index("presence") < s.index("voice") < s.index("voice_examples_canonical")
+
+    def test_debug_static_voice_metrics(self):
+        _, debug = build_dialogue_context_debug(self.ast)
+        assert debug["static"]["has_peak"] is True
+        assert debug["static"]["has_peak_when"] is True
+        assert debug["static"]["voice_kernel_chars"] > 0
+        assert debug["static"]["mes_canonical_count"] == 2
+
+    def test_debug_never_counts(self):
+        _, debug = build_dialogue_context_debug(parse(PRIORITY_NOTATION))
+        s = debug["static"]
+        assert s["never_total"] == 10
+        assert s["never_rendered"] == 7
+        assert s["never_dropped"] == 3
+        assert s["never_critical_count"] == 2
+
+    def test_debug_dynamic_arc_phase_recorded(self):
+        _, debug = build_dialogue_context_debug(
+            parse(ARC_NOTATION), trust=0.0, known_facts=set()
+        )
+        assert debug["dynamic"]["arc_phase"] == "guarded"
+
+    def test_debug_dynamic_active_goals_recorded(self):
+        _, debug = build_dialogue_context_debug(self.ast, trust=0.8)
+        goals = debug["dynamic"]["active_goals"]
+        assert len(goals) >= 1
+        names = {g["name"] for g in goals}
+        assert "protect_daughter" in names
+        for g in goals:
+            if g["name"] == "protect_daughter":
+                assert g["has_behavior"] is True
+
+    def test_debug_dynamic_records_state(self):
+        _, debug = build_dialogue_context_debug(
+            self.ast, trust=0.3, turn=7, state_vars={"ruin": 2}, uncertain=True
+        )
+        d = debug["dynamic"]
+        assert d["trust"] == 0.3
+        assert d["turn"] == 7
+        assert d["state_vars"] == {"ruin": 2}
+        assert d["uncertain"] is True
+
+    def test_debug_context_equals_plain_build(self):
+        """Debug variant must return the same context string as the plain call."""
+        plain = build_dialogue_context(
+            self.ast, trust=0.5, turn=3, state_vars={"ruin": 1}
+        )
+        ctx, _ = build_dialogue_context_debug(
+            self.ast, trust=0.5, turn=3, state_vars={"ruin": 1}
+        )
+        assert ctx == plain
+
+    def test_debug_voice_reminder_peak_flag(self):
+        """voice_reminder_peak tracks whether peak swap happened."""
+        _, debug = build_dialogue_context_debug(
+            self.ast, trust=0.0, state_vars={"ruin": 0}
+        )
+        assert debug["dynamic"]["voice_reminder_peak"] is False
