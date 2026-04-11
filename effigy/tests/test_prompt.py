@@ -177,7 +177,7 @@ class TestBuildDialogueContext:
 
     def test_includes_arc_phase(self):
         ctx = build_dialogue_context(self.ast, trust=0.0, state_vars={"ruin": 1})
-        assert "GUARDED" in ctx
+        assert '<arc_phase name="guarded">' in ctx
 
     def test_includes_active_goals(self):
         ctx = build_dialogue_context(self.ast, trust=0.5, state_vars={"ruin": 1})
@@ -250,32 +250,41 @@ class TestV02ContextSections:
         self.ctx = build_dialogue_context(self.ast)
 
     def test_includes_traits(self):
-        assert "BEHAVIORAL TRAITS" in self.ctx
+        assert "<traits>" in self.ctx
         assert "brisk" in self.ctx
         assert "hospitality-as-control" in self.ctx
 
     def test_includes_never(self):
-        assert "NEVER" in self.ctx
+        assert "<never>" in self.ctx
         assert "analytical language" in self.ctx
         assert "keeping secrets" in self.ctx
 
     def test_includes_quirks(self):
-        assert "BEHAVIORAL QUIRKS" in self.ctx
+        assert "<quirks>" in self.ctx
         assert "counter" in self.ctx
         assert "coffee" in self.ctx
 
     def test_theme_excluded_from_context(self):
         assert "THEMATIC ROLE" not in self.ctx
+        assert "<theme>" not in self.ctx
 
     def test_section_ordering(self):
-        """Static prefix (voice → never → quirks → ... → traits) precedes dynamic (arc → goals)."""
-        voice_pos = self.ctx.index("VOICE REINFORCEMENT")
-        never_pos = self.ctx.index("NEVER")
-        quirk_pos = self.ctx.index("BEHAVIORAL QUIRKS")
-        trait_pos = self.ctx.index("BEHAVIORAL TRAITS")
-        arc_pos = self.ctx.index("CHARACTER ARC PHASE")
-        goal_pos = self.ctx.index("ACTIVE GOALS")
-        assert voice_pos < never_pos < quirk_pos < trait_pos < arc_pos < goal_pos
+        """Static prefix (voice → never → quirks → ... → traits) precedes dynamic (arc → goals → voice_reminder)."""
+        voice_pos = self.ctx.index("<voice>")
+        never_pos = self.ctx.index("<never>")
+        quirk_pos = self.ctx.index("<quirks>")
+        trait_pos = self.ctx.index("<traits>")
+        arc_pos = self.ctx.index("<arc_phase")
+        goal_pos = self.ctx.index("<active_goals>")
+        reminder_pos = self.ctx.index("<voice_reminder>")
+        assert voice_pos < never_pos < quirk_pos < trait_pos < arc_pos < goal_pos < reminder_pos
+
+    def test_voice_reminder_is_last(self):
+        """voice_reminder sandwich: must be the final section for attention."""
+        reminder_pos = self.ctx.index("<voice_reminder>")
+        # Nothing else should come after voice_reminder's opening tag except its own close.
+        tail = self.ctx[reminder_pos:]
+        assert tail.count("\n\n") == 0  # no further sections
 
 
 # ---------------------------------------------------------------------------
@@ -366,17 +375,17 @@ class TestRealFileContext:
     def test_context_has_never(self, filename):
         ast = self._load(filename)
         ctx = build_dialogue_context(ast)
-        assert "NEVER" in ctx
+        assert "<never>" in ctx
 
     def test_context_has_traits(self, filename):
         ast = self._load(filename)
         ctx = build_dialogue_context(ast)
-        assert "BEHAVIORAL TRAITS" in ctx
+        assert "<traits>" in ctx
 
     def test_context_has_quirks(self, filename):
         ast = self._load(filename)
         ctx = build_dialogue_context(ast)
-        assert "BEHAVIORAL QUIRKS" in ctx
+        assert "<quirks>" in ctx
 
     def test_context_excludes_theme(self, filename):
         ast = self._load(filename)
@@ -422,13 +431,13 @@ class TestWrongExclusion:
     def test_wrong_not_in_dialogue_context(self):
         ctx = build_dialogue_context(self.ast)
         assert "DO NOT generate" not in ctx
-        assert "WRONG" not in ctx
+        assert "<wrong>" not in ctx
         assert "data suggests" not in ctx
         assert "field notes" not in ctx
 
     def test_never_still_present(self):
         ctx = build_dialogue_context(self.ast)
-        assert "NEVER" in ctx
+        assert "<never>" in ctx
         assert "academic language" in ctx
 
     def test_voice_still_present(self):
@@ -510,18 +519,20 @@ class TestStaticDynamicSplit:
 
     def test_static_contains_only_static_sections(self):
         ctx = build_static_context(self.ast)
-        assert "VOICE REINFORCEMENT" in ctx
-        assert "NEVER" in ctx
-        assert "BEHAVIORAL QUIRKS" in ctx
-        assert "BEHAVIORAL TRAITS" in ctx
-        assert "CHARACTER ARC PHASE" not in ctx
-        assert "ACTIVE GOALS" not in ctx
+        assert "<voice>" in ctx
+        assert "<never>" in ctx
+        assert "<quirks>" in ctx
+        assert "<traits>" in ctx
+        assert "<arc_phase" not in ctx
+        assert "<active_goals>" not in ctx
+        assert "<voice_reminder>" not in ctx
 
     def test_dynamic_contains_only_dynamic_sections(self):
         ctx = build_dynamic_state(self.ast, trust=0.5, state_vars={"ruin": 1})
-        assert "CHARACTER ARC PHASE" in ctx
-        assert "VOICE REINFORCEMENT" not in ctx
-        assert "NEVER" not in ctx
+        assert "<arc_phase" in ctx
+        assert "<voice_reminder>" in ctx
+        assert "<kernel>" not in ctx  # static voice block is NOT here
+        assert "<never>" not in ctx
 
     def test_dynamic_changes_with_trust(self):
         """Different trust levels should yield different dynamic context."""
@@ -531,8 +542,8 @@ class TestStaticDynamicSplit:
             arc_ast, trust=0.5, known_facts={"knows_her_name", "overheard_argument"}
         )
         assert low != high
-        assert "GUARDED" in low
-        assert "VULNERABLE" in high
+        assert 'name="guarded"' in low
+        assert 'name="vulnerable"' in high
 
     def test_dialogue_context_is_static_plus_dynamic(self):
         """build_dialogue_context must equal static + '\\n\\n' + dynamic."""

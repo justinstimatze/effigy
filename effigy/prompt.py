@@ -304,7 +304,7 @@ def build_static_context(ast: CharacterAST) -> str:
 
     # --- Voice reinforcement (primary steering) ---
     if ast.voice and ast.voice.kernel:
-        sections.append(f"VOICE REINFORCEMENT: {ast.voice.kernel}")
+        sections.append(f"<voice>\n  <kernel>{ast.voice.kernel}</kernel>\n</voice>")
 
     # --- Never-would-say constraints (capped, prioritized) ---
     # Sort `CRITICAL:`-prefixed rules first, then cap at MAX_NEVER_RULES.
@@ -313,34 +313,30 @@ def build_static_context(ast: CharacterAST) -> str:
         regular = [n for n in ast.never_would_say if not n.upper().startswith("CRITICAL:")]
         prioritized = (critical + regular)[:MAX_NEVER_RULES]
         never_lines = [f"  - {n}" for n in prioritized]
-        sections.append("NEVER (this character would NEVER):\n" + "\n".join(never_lines))
+        sections.append("<never>\n" + "\n".join(never_lines) + "\n</never>")
 
     # --- Observable quirks ---
     if ast.quirks:
         quirk_lines = [f"  - {q}" for q in ast.quirks]
-        sections.append("BEHAVIORAL QUIRKS:\n" + "\n".join(quirk_lines))
+        sections.append("<quirks>\n" + "\n".join(quirk_lines) + "\n</quirks>")
 
     # --- Props (concrete domain objects to reach for) ---
     if ast.props:
-        sections.append(
-            "PROPS (concrete objects this character can reference -- "
-            "use naturally, do NOT list or info-dump):\n" + "  " + " ".join(ast.props)
-        )
+        sections.append("<props>\n  " + " ".join(ast.props) + "\n</props>")
 
     # --- NPC-to-NPC relationships ---
     if ast.relationships:
         rel_lines = []
         for rel in ast.relationships:
             rel_lines.append(
-                f"  - {rel.target}: {rel.rel_type} ({rel.intensity:.1f}) -- {rel.notes}"
+                f'  <rel target="{rel.target}" type="{rel.rel_type}" '
+                f'intensity="{rel.intensity:.1f}">{rel.notes}</rel>'
             )
-        sections.append(
-            "RELATIONSHIPS (how this character feels about other NPCs):\n" + "\n".join(rel_lines)
-        )
+        sections.append("<relationships>\n" + "\n".join(rel_lines) + "\n</relationships>")
 
     # --- Behavioral traits (PList) ---
     if ast.traits:
-        sections.append(f"BEHAVIORAL TRAITS: {', '.join(ast.traits)}")
+        sections.append(f"<traits>{', '.join(ast.traits)}</traits>")
 
     return "\n\n".join(sections)
 
@@ -365,25 +361,30 @@ def build_dynamic_state(
     # --- Arc phase ---
     phase = resolve_arc_phase(ast, trust, known_facts=known_facts, state_vars=state_vars)
     if phase:
-        phase_section = f"CHARACTER ARC PHASE: {phase.name.upper()}"
+        phase_lines = [f'<arc_phase name="{phase.name}">']
         if phase.voice:
-            phase_section += f"\nVoice shift: {phase.voice}"
-        sections.append(phase_section)
+            phase_lines.append(f"  <voice_shift>{phase.voice}</voice_shift>")
+        phase_lines.append("</arc_phase>")
+        sections.append("\n".join(phase_lines))
 
     # --- Active goals ---
     goals = resolve_active_goals(ast, trust, known_facts=known_facts, state_vars=state_vars)
     active_goals = [g for g in goals if g["active"]]
     if active_goals:
-        goal_lines = []
+        goal_lines = ["<active_goals>"]
         for g in active_goals[:3]:
-            line = f"  - {g['name']} (priority: {g['weight']:.1f}"
+            attrs = f'weight="{g["weight"]:.1f}"'
             if g.get("grows_with"):
-                line += f", grows with {g['grows_with']}"
-            line += ")"
-            goal_lines.append(line)
-        sections.append(
-            "ACTIVE GOALS (what this character is trying to accomplish):\n" + "\n".join(goal_lines)
-        )
+                attrs += f' grows_with="{g["grows_with"]}"'
+            goal_lines.append(f'  <goal {attrs}>{g["name"]}</goal>')
+        goal_lines.append("</active_goals>")
+        sections.append("\n".join(goal_lines))
+
+    # --- Voice reminder (sandwich: last thing before generation) ---
+    # Counters lost-in-the-middle by putting the voice kernel immediately
+    # before the generation point. One line; high attention cost/benefit.
+    if ast.voice and ast.voice.kernel:
+        sections.append(f"<voice_reminder>{ast.voice.kernel}</voice_reminder>")
 
     return "\n\n".join(sections)
 
