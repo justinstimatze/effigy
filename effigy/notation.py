@@ -145,6 +145,23 @@ class WrongExampleAST:
 
 
 @dataclass
+class TestAST:
+    """A named reasoning test for voice/behavior quality.
+
+    Unlike NEVER rules (binary constraints) or WRONG examples (anti-patterns),
+    tests give the LLM a reasoning framework: a question to ask about its own
+    output, with fail/pass examples and an explanation of the underlying principle.
+    """
+
+    name: str
+    question: str
+    fail_examples: list[str] = field(default_factory=list)
+    pass_examples: list[str] = field(default_factory=list)
+    why: str = ""
+    dimension: str = ""  # optional: "voice", "agency", "knowledge", etc.
+
+
+@dataclass
 class PostProcRuleAST:
     """A deterministic post-processing rule for generation output.
 
@@ -226,6 +243,9 @@ class CharacterAST:
     # Wrong examples (anti-patterns for voice drift prevention)
     wrong_examples: list[WrongExampleAST] = field(default_factory=list)
 
+    # Reasoning tests (contextual quality checks rendered into generation prompt)
+    tests: list[TestAST] = field(default_factory=list)
+
     # Post-processing rules (deterministic filters applied to generation output)
     post_processors: list[PostProcRuleAST] = field(default_factory=list)
 
@@ -258,6 +278,7 @@ BLOCK_KEYWORDS = {
     "ARRIVE",
     "DEPART",
     "WRONG",
+    "TEST",
     "PROPS",
     "BEHAVIORS",
     "POSTPROC",

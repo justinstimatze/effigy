@@ -82,9 +82,9 @@ def _extract_facts(ast, raw_text: str) -> dict:
     import effigy.validators
     modules = {
         "effigy.parser": {"doc": (effigy.parser.__doc__ or "").split("\n")[0], "exports": ["parse", "parse_file", "ParseError"]},
-        "effigy.notation": {"doc": "AST node definitions", "exports": ["CharacterAST", "VoiceAST", "ArcPhaseAST", "GoalAST", "SecretAST", "RelationshipAST", "PostProcRuleAST", "..."]},
+        "effigy.notation": {"doc": "AST node definitions", "exports": ["CharacterAST", "VoiceAST", "ArcPhaseAST", "GoalAST", "SecretAST", "RelationshipAST", "PostProcRuleAST", "TestAST", "..."]},
         "effigy.expand": {"doc": (effigy.expand.__doc__ or "").split("\n")[0], "exports": ["expand", "expand_to_json"]},
-        "effigy.prompt": {"doc": (effigy.prompt.__doc__ or "").split("\n")[0], "exports": ["build_dialogue_context", "build_static_context", "build_dynamic_state", "build_dialogue_context_debug", "resolve_arc_phase", "resolve_active_goals", "get_arc_phase_dict", "select_mes_examples", "select_canonical_mes", "select_rotating_mes", "get_wrong_examples", "validate_never_budget"]},
+        "effigy.prompt": {"doc": (effigy.prompt.__doc__ or "").split("\n")[0], "exports": ["build_dialogue_context", "build_static_context", "build_dynamic_state", "build_dialogue_context_debug", "resolve_arc_phase", "resolve_active_goals", "get_arc_phase_dict", "select_mes_examples", "select_canonical_mes", "select_rotating_mes", "get_wrong_examples", "get_tests", "validate_never_budget"]},
         "effigy.evolve": {"doc": (effigy.evolve.__doc__ or "").split("\n")[0], "exports": ["compute_emotional_state", "EmotionalState", "compute_intentions", "build_evolution_context", "build_synthesis_prompt"]},
         "effigy.evaluate": {"doc": (effigy.evaluate.__doc__ or "").split("\n")[0], "exports": ["evaluate_effigy_file", "evaluate_tier1", "evaluate_all", "wrong_bleed_score", "voice_drift_score", "compliance_check", "evaluate_generation"]},
         "effigy.validators": {"doc": (effigy.validators.__doc__ or "").split("\n")[0], "exports": ["RegexValidator", "ValidationViolation", "validate", "strip_violations", "validators_from_ast", "has_blocking_violation", "revise_if_violated"]},
@@ -132,6 +132,7 @@ def _extract_facts(ast, raw_text: str) -> dict:
             ("ERA[]", "Multi-era character state"),
             ("DM{}", "Drivermap personality profile"),
             ("WRONG[]", "Anti-pattern Wrong/Right/Why examples"),
+            ("TEST[]", "Named reasoning tests with fail/pass examples and why"),
             ("ARRIVE[]", "Entrance lines"),
             ("DEPART[]", "Exit lines"),
         ],

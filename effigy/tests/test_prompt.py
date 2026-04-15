@@ -574,6 +574,143 @@ class TestValidateNeverBudget:
         assert validate_never_budget(ast) == []
 
 
+# ---------------------------------------------------------------------------
+# TEST block rendering
+# ---------------------------------------------------------------------------
+
+TEST_NOTATION = """
+@id test_tests
+@name Test Tests
+
+VOICE{
+  kernel: Brisk and knowing.
+}
+
+NEVER[
+  Never asks questions
+]
+
+TEST[
+  name: CONTROL TEST
+  dimension: voice
+  question: Does this line EXTRACT or REQUEST?
+  fail: "You passing through?" -- question
+  pass: "Strangers don't come through without a reason." -- statement
+  why: Power comes from ALREADY KNOWING.
+---
+  name: FRAGMENT TEST
+  question: Does this line fragment under pressure?
+  fail: "I need to tell you something important about what happened." -- complete
+  pass: "The thing is -- you don't -- it wasn't." -- fragments
+  why: Emotional pressure breaks syntax.
+]
+
+QUIRKS[
+  Wipes counter when uncomfortable
+]
+"""
+
+
+class TestTestRendering:
+    def setup_method(self):
+        self.ast = parse(TEST_NOTATION)
+
+    def test_tests_in_static_context(self):
+        ctx = build_static_context(self.ast)
+        assert "<tests>" in ctx
+        assert "</tests>" in ctx
+
+    def test_test_name_rendered(self):
+        ctx = build_static_context(self.ast)
+        assert 'name="CONTROL TEST"' in ctx
+
+    def test_test_dimension_rendered(self):
+        ctx = build_static_context(self.ast)
+        assert 'dimension="voice"' in ctx
+
+    def test_test_question_rendered(self):
+        ctx = build_static_context(self.ast)
+        assert "<question>" in ctx
+        assert "EXTRACT or REQUEST" in ctx
+
+    def test_fail_pass_rendered(self):
+        ctx = build_static_context(self.ast)
+        assert "<fail>" in ctx
+        assert "<pass>" in ctx
+        assert "You passing through?" in ctx
+        assert "Strangers don't come through" in ctx
+
+    def test_why_rendered(self):
+        ctx = build_static_context(self.ast)
+        assert "<why>" in ctx
+        assert "ALREADY KNOWING" in ctx
+
+    def test_tests_after_never_before_quirks(self):
+        ctx = build_static_context(self.ast)
+        never_pos = ctx.index("<never>")
+        tests_pos = ctx.index("<tests>")
+        quirks_pos = ctx.index("<quirks>")
+        assert never_pos < tests_pos < quirks_pos
+
+    def test_not_in_dynamic_state(self):
+        ctx = build_dynamic_state(self.ast)
+        assert "<tests>" not in ctx
+
+    def test_dimension_omitted_when_empty(self):
+        ctx = build_static_context(self.ast)
+        # FRAGMENT TEST has no dimension — its <test> tag should not have dimension attr
+        fragment_idx = ctx.index('name="FRAGMENT TEST"')
+        # Find the opening <test for this entry
+        tag_start = ctx.rfind("<test ", 0, fragment_idx)
+        tag_end = ctx.index(">", fragment_idx)
+        tag = ctx[tag_start:tag_end + 1]
+        assert "dimension" not in tag
+
+
+class TestTestsCap:
+    def test_max_tests_cap(self):
+        from effigy.prompt import MAX_TESTS
+
+        tests = "\n---\n".join(
+            f"  name: TEST {i}\n  question: Q{i}?\n  fail: bad\n  pass: good\n  why: reason"
+            for i in range(8)
+        )
+        text = f"@id x\nTEST[\n{tests}\n]\n"
+        ast = parse(text)
+        assert len(ast.tests) == 8  # AST preserves all
+        ctx = build_static_context(ast)
+        assert ctx.count("<test ") == MAX_TESTS
+
+
+class TestTestDebug:
+    def test_debug_records_test_counts(self):
+        ast = parse(TEST_NOTATION)
+        _, debug = build_dialogue_context_debug(ast)
+        assert debug["static"]["tests_total"] == 2
+        assert debug["static"]["tests_rendered"] == 2
+        assert "tests" in debug["static"]["sections"]
+
+
+class TestGetTests:
+    def test_get_tests_accessor(self):
+        from effigy.prompt import get_tests
+
+        ast = parse(TEST_NOTATION)
+        tests = get_tests(ast)
+        assert len(tests) == 2
+        assert tests[0]["name"] == "CONTROL TEST"
+        assert tests[0]["dimension"] == "voice"
+        assert "EXTRACT" in tests[0]["question"]
+        assert len(tests[0]["fail_examples"]) == 1
+        assert tests[0]["why"] == "Power comes from ALREADY KNOWING."
+
+    def test_get_tests_empty(self):
+        from effigy.prompt import get_tests
+
+        ast = parse("@id x\n")
+        assert get_tests(ast) == []
+
+
 INLINE_EXAMPLES_NOTATION = """
 @id test_inline
 @name Test Inline

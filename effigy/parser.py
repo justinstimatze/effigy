@@ -35,6 +35,7 @@ from effigy.notation import (
     RelationshipAST,
     ScheduleAST,
     SecretAST,
+    TestAST,
     VoiceAST,
     WrongExampleAST,
 )
@@ -764,6 +765,61 @@ def _parse_wrong_block(content: str) -> list[WrongExampleAST]:
     return result
 
 
+def _parse_test_block(content: str) -> list[TestAST]:
+    """Parse TEST[...] -- named reasoning tests separated by ---.
+
+    Each entry has fields (case-insensitive):
+      name: TEST NAME
+      dimension: voice (optional)
+      question: Does this line do X?
+      fail: "example" -- explanation (repeatable)
+      pass: "example" -- explanation (repeatable)
+      why: Reasoning explanation
+    """
+    items = _split_items(content)
+    result: list[TestAST] = []
+
+    for item in items:
+        name = ""
+        dimension = ""
+        question = ""
+        fail_examples: list[str] = []
+        pass_examples: list[str] = []
+        why = ""
+
+        for line in item.strip().split("\n"):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            low = line.lower()
+            if low.startswith("name:"):
+                name = line[5:].strip()
+            elif low.startswith("dimension:"):
+                dimension = line[10:].strip()
+            elif low.startswith("question:"):
+                question = line[9:].strip()
+            elif low.startswith("fail:"):
+                fail_examples.append(line[5:].strip())
+            elif low.startswith("pass:"):
+                pass_examples.append(line[5:].strip())
+            elif low.startswith("why:"):
+                why = line[4:].strip()
+
+        if name and question:
+            result.append(
+                TestAST(
+                    name=name,
+                    question=question,
+                    fail_examples=fail_examples,
+                    pass_examples=pass_examples,
+                    why=why,
+                    dimension=dimension,
+                )
+            )
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Main parser
 # ---------------------------------------------------------------------------
@@ -858,6 +914,10 @@ def parse(text: str) -> CharacterAST:
             state.advance(len(word))
             content = _read_bracketed_block(state)
             ast.wrong_examples = _parse_wrong_block(content)
+        elif word == "TEST":
+            state.advance(len(word))
+            content = _read_bracketed_block(state)
+            ast.tests = _parse_test_block(content)
         elif word == "PROPS":
             state.advance(len(word))
             content = _read_bracketed_block(state)

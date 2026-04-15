@@ -172,6 +172,37 @@ BEHAVIORS{
 # ---------------------------------------------------------------------------
 
 # Roundtrip tests require matching .effigy + .json pairs from a game corpus.
+class TestExpandTests:
+    def test_tests_serialized(self):
+        text = """
+@id x
+TEST[
+  name: CTRL
+  dimension: voice
+  question: Does it extract?
+  fail: "You passing through?" -- question
+  pass: "Strangers don't come without a reason." -- statement
+  why: Already knows.
+]
+"""
+        ast = parse(text)
+        result = expand(ast)
+        assert "tests" in result
+        assert len(result["tests"]) == 1
+        t = result["tests"][0]
+        assert t["name"] == "CTRL"
+        assert t["dimension"] == "voice"
+        assert t["question"] == "Does it extract?"
+        assert len(t["fail_examples"]) == 1
+        assert len(t["pass_examples"]) == 1
+        assert t["why"] == "Already knows."
+
+    def test_empty_tests_not_in_output(self):
+        ast = parse("@id x\n")
+        result = expand(ast)
+        assert "tests" not in result
+
+
 # These are integration tests that skip when corpus files are not available.
 _EFFIGY_DIRS = [
     Path(__file__).parent / "fixtures",

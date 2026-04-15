@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 # enough that 10 fits the same attention budget as 7 bloated ones.
 MAX_NEVER_RULES = 10
 
+# Max reasoning tests surfaced in generation context. Tests are longer
+# than NEVER rules (question + fail/pass examples + why ≈ 4-6 lines each),
+# so 5 tests occupy roughly the same attention budget as 10 NEVER rules.
+MAX_TESTS = 5
+
 # Markers authors conventionally use to embed inline examples inside a
 # NEVER rule. Case-sensitive (uppercase only) — lowercase 'wrong' in
 # prose is fine. Matches `WRONG:`, `RIGHT:`, `NOT:`, `YES:`, `BAD:`,
@@ -469,8 +474,8 @@ def build_static_context(
     eligible for prompt prefix caching (Anthropic, OpenAI, etc.).
 
     Sections are ordered strongest-signal-first for attention:
-    presence → voice → voice_examples → never → quirks → props →
-    relationships → traits → drivermap.
+    presence → voice → voice_examples → never → tests → quirks →
+    props → relationships → traits → drivermap.
 
     Args:
         _debug: Optional dict; when provided, populated with per-section
@@ -538,6 +543,28 @@ def build_static_context(
             _debug["never_inline_examples_stripped"] = sum(
                 1 for p, s in zip(prioritized, stripped) if p != s
             )
+
+    # --- Reasoning tests (contextual quality checks) ---
+    if ast.tests:
+        capped = ast.tests[:MAX_TESTS]
+        test_lines = ["<tests>"]
+        for t in capped:
+            dim_attr = f' dimension="{t.dimension}"' if t.dimension else ""
+            test_lines.append(f'  <test name="{t.name}"{dim_attr}>')
+            test_lines.append(f"    <question>{t.question}</question>")
+            for f in t.fail_examples:
+                test_lines.append(f"    <fail>{f}</fail>")
+            for p in t.pass_examples:
+                test_lines.append(f"    <pass>{p}</pass>")
+            if t.why:
+                test_lines.append(f"    <why>{t.why}</why>")
+            test_lines.append("  </test>")
+        test_lines.append("</tests>")
+        sections.append("\n".join(test_lines))
+        dbg_sections.append("tests")
+        if _debug is not None:
+            _debug["tests_total"] = len(ast.tests)
+            _debug["tests_rendered"] = len(capped)
 
     # --- Observable quirks ---
     if ast.quirks:
@@ -809,6 +836,23 @@ def get_wrong_examples(ast: CharacterAST) -> list[dict[str, str]]:
             entry["right"] = we.right
         if we.why:
             entry["why"] = we.why
+        results.append(entry)
+    return results
+
+
+def get_tests(ast: CharacterAST) -> list[dict[str, Any]]:
+    """Return TEST entries for eval/reference use."""
+    results: list[dict[str, Any]] = []
+    for t in ast.tests:
+        entry: dict[str, Any] = {"name": t.name, "question": t.question}
+        if t.dimension:
+            entry["dimension"] = t.dimension
+        if t.fail_examples:
+            entry["fail_examples"] = list(t.fail_examples)
+        if t.pass_examples:
+            entry["pass_examples"] = list(t.pass_examples)
+        if t.why:
+            entry["why"] = t.why
         results.append(entry)
     return results
 

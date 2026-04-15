@@ -408,6 +408,107 @@ QUIRKS[
         assert "coffee" in ast.quirks[1]
 
 
+class TestTestBlock:
+    def test_parse_single_test(self):
+        text = """@id x
+TEST[
+  name: CONTROL TEST
+  dimension: voice
+  question: Does this line EXTRACT or REQUEST?
+  fail: "You passing through?" -- question
+  fail: "What brings you?" -- gives stranger the floor
+  pass: "Strangers don't come through without a reason." -- statement
+  pass: "You've been up there a few times now." -- surveillance
+  why: Power comes from ALREADY KNOWING.
+]
+"""
+        ast = parse(text)
+        assert len(ast.tests) == 1
+        t = ast.tests[0]
+        assert t.name == "CONTROL TEST"
+        assert t.dimension == "voice"
+        assert "EXTRACT" in t.question
+        assert len(t.fail_examples) == 2
+        assert len(t.pass_examples) == 2
+        assert "ALREADY KNOWING" in t.why
+
+    def test_parse_multiple_tests(self):
+        text = """@id x
+TEST[
+  name: TEST ONE
+  question: Question one?
+  fail: bad
+  pass: good
+  why: reason one
+---
+  name: TEST TWO
+  question: Question two?
+  fail: bad2
+  pass: good2
+  why: reason two
+]
+"""
+        ast = parse(text)
+        assert len(ast.tests) == 2
+        assert ast.tests[0].name == "TEST ONE"
+        assert ast.tests[1].name == "TEST TWO"
+
+    def test_dimension_optional(self):
+        text = """@id x
+TEST[
+  name: NO DIM
+  question: A question?
+  fail: bad
+  pass: good
+]
+"""
+        ast = parse(text)
+        assert ast.tests[0].dimension == ""
+
+    def test_skip_without_name(self):
+        text = """@id x
+TEST[
+  question: orphan question?
+  fail: bad
+  pass: good
+]
+"""
+        ast = parse(text)
+        assert len(ast.tests) == 0
+
+    def test_skip_without_question(self):
+        text = """@id x
+TEST[
+  name: NO QUESTION
+  fail: bad
+  pass: good
+]
+"""
+        ast = parse(text)
+        assert len(ast.tests) == 0
+
+    def test_empty_block(self):
+        text = "@id x\nTEST[\n]\n"
+        ast = parse(text)
+        assert ast.tests == []
+
+    def test_case_insensitive_fields(self):
+        text = """@id x
+TEST[
+  NAME: UPPER CASE
+  QUESTION: Does it work?
+  FAIL: bad example
+  PASS: good example
+  WHY: because
+]
+"""
+        ast = parse(text)
+        assert len(ast.tests) == 1
+        assert ast.tests[0].name == "UPPER CASE"
+        assert ast.tests[0].fail_examples == ["bad example"]
+        assert ast.tests[0].pass_examples == ["good example"]
+
+
 class TestTheme:
     def test_parse_theme_header(self):
         text = "@id x\n@theme The cost of loyalty to the dead\n"

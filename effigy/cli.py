@@ -80,6 +80,7 @@ def cmd_compile(args: argparse.Namespace) -> None:
     print(f"  Arrival lines: {len(ast.arrival_lines)}")
     print(f"  Departure lines: {len(ast.departure_lines)}")
     print(f"  Wrong examples: {len(ast.wrong_examples)}")
+    print(f"  Tests: {len(ast.tests)}")
     print(f"  Props: {len(ast.props)}")
     print(f"  Goal behaviors: {len(ast.goal_behaviors)}")
 

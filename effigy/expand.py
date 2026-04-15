@@ -129,6 +129,24 @@ def expand(ast: CharacterAST) -> dict:
     if ast.goal_behaviors:
         result["goal_behaviors"] = dict(ast.goal_behaviors)
 
+    # Reasoning tests
+    if ast.tests:
+        result["tests"] = []
+        for t in ast.tests:
+            td: dict = {
+                "name": t.name,
+                "question": t.question,
+            }
+            if t.dimension:
+                td["dimension"] = t.dimension
+            if t.fail_examples:
+                td["fail_examples"] = list(t.fail_examples)
+            if t.pass_examples:
+                td["pass_examples"] = list(t.pass_examples)
+            if t.why:
+                td["why"] = t.why
+            result["tests"].append(td)
+
     return result
 
 
