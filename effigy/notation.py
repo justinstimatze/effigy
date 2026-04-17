@@ -142,6 +142,7 @@ class WrongExampleAST:
     wrong: str = ""  # the wrong response (what NOT to generate)
     right: str = ""  # the correct response (what TO generate instead)
     why: str = ""  # explanation of why the wrong response is wrong
+    when: str = ""  # condition DSL gate; empty or "*" = always active
 
 
 @dataclass
@@ -159,6 +160,7 @@ class TestAST:
     pass_examples: list[str] = field(default_factory=list)
     why: str = ""
     dimension: str = ""  # optional: "voice", "agency", "knowledge", etc.
+    when: str = ""  # condition DSL gate; empty or "*" = always active
 
 
 @dataclass
@@ -174,6 +176,25 @@ class PostProcRuleAST:
     pattern: str = ""  # regex pattern (case-insensitive by default)
     why: str = ""  # human-readable rationale for the rule
     rule_id: str = ""  # optional stable identifier; auto-generated if empty
+
+
+@dataclass
+class NeverRuleAST:
+    """A NEVER-would-say constraint with optional @when gating.
+
+    The ``text`` is the rule string (what the character would never do or
+    say). ``when`` is a condition DSL string (same grammar as ARC phase
+    gates); empty or ``"*"`` means the rule is always active.
+
+    The ``__str__`` method returns ``text`` so legacy f-string formatting
+    still works. Callers reading the rule content should use ``.text``.
+    """
+
+    text: str
+    when: str = ""
+
+    def __str__(self) -> str:
+        return self.text
 
 
 @dataclass
@@ -207,7 +228,7 @@ class CharacterAST:
 
     # Behavioral dossier (PList+Ali:Chat architecture)
     traits: list[str] = field(default_factory=list)  # PList-style compact behavioral rules
-    never_would_say: list[str] = field(default_factory=list)  # negative constraints
+    never_would_say: list[NeverRuleAST] = field(default_factory=list)  # negative constraints
     quirks: list[str] = field(default_factory=list)  # observable behaviors, physical tells
 
     # Dialogue examples with trust-tier gating.

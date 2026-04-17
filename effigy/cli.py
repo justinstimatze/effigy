@@ -28,14 +28,14 @@ def _check_mes_never_contradictions(ast) -> list[str]:
     warnings: list[str] = []
     for never_rule in ast.never_would_say:
         # Extract key phrases from the NEVER rule (words > 4 chars)
-        key_phrases = [w.lower() for w in never_rule.split() if len(w) > 4]
+        key_phrases = [w.lower() for w in never_rule.text.split() if len(w) > 4]
         for i, ex in enumerate(ast.mes_examples):
             ex_text = (ex.text if hasattr(ex, "text") else ex).lower()
             for phrase in key_phrases:
                 if phrase in ex_text:
                     warnings.append(
                         f"MES example {i + 1} contains '{phrase}' "
-                        f"which may contradict NEVER rule: {never_rule[:60]}"
+                        f"which may contradict NEVER rule: {never_rule.text[:60]}"
                     )
                     break  # one warning per MES/NEVER pair
     return warnings

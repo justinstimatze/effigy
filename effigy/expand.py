@@ -121,7 +121,17 @@ def expand(ast: CharacterAST) -> dict:
     if ast.traits:
         result["traits"] = list(ast.traits)
     if ast.never_would_say:
-        result["never_would_say"] = list(ast.never_would_say)
+        # Preserve @when gates in JSON output when present. When any rule
+        # has a gate, emit every rule as a uniform {"text", "when"} dict so
+        # consumers have one code path. Otherwise emit plain strings for
+        # backward compatibility with pre-@when consumers.
+        if any(n.when for n in ast.never_would_say):
+            result["never_would_say"] = [
+                {"text": n.text, "when": n.when}
+                for n in ast.never_would_say
+            ]
+        else:
+            result["never_would_say"] = [n.text for n in ast.never_would_say]
     if ast.quirks:
         result["quirks"] = list(ast.quirks)
     if ast.theme:

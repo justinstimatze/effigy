@@ -367,7 +367,7 @@ def compliance_check(
     Returns a dict ``{rule_text: violated_bool}``. Empty NEVER list
     returns an empty dict.
     """
-    return {rule: bool(judge(rule, generated)) for rule in ast.never_would_say}
+    return {rule.text: bool(judge(rule.text, generated)) for rule in ast.never_would_say}
 
 
 def evaluate_generation(

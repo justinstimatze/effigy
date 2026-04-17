@@ -77,12 +77,12 @@ def validate_never_budget(ast: CharacterAST) -> list[dict[str, Any]]:
     """
     if not ast.never_would_say:
         return []
-    critical = [n for n in ast.never_would_say if n.upper().startswith("CRITICAL:")]
-    regular = [n for n in ast.never_would_say if not n.upper().startswith("CRITICAL:")]
+    critical = [n for n in ast.never_would_say if n.text.upper().startswith("CRITICAL:")]
+    regular = [n for n in ast.never_would_say if not n.text.upper().startswith("CRITICAL:")]
     prioritized = critical + regular
     if len(prioritized) <= MAX_NEVER_RULES:
         return []
-    dropped = prioritized[MAX_NEVER_RULES:]
+    dropped = [n.text for n in prioritized[MAX_NEVER_RULES:]]
     return [{
         "char_id": ast.char_id,
         "total": len(prioritized),
@@ -192,30 +192,17 @@ def resolve_arc_phase(
     return active
 
 
-def _conditions_met(
-    phase: ArcPhaseAST,
+def _evaluate_conditions_dict(
+    conditions: dict,
     trust: float,
     state_vars: dict[str, float],
     known_facts: set[str],
-    char_id: str = "",
 ) -> bool:
-    """Check if all conditions in a phase gate are satisfied.
+    """Evaluate a parsed conditions dict (from parser._parse_conditions).
 
-    Uses an optional external condition evaluator when available, falls back
-    to legacy dict-based evaluation otherwise.
+    Shared by arc-phase checks and @when-gate checks so effigy can
+    evaluate both without depending on an external DSL library.
     """
-    # Try unified condition DSL first
-    cond_str = phase.condition_str
-    if cond_str and _HAS_CONDITIONS:
-        resolved = cond_str.replace("_NPC_", char_id) if char_id else cond_str
-        try:
-            state = _EffigyConditionState(trust, state_vars, known_facts, char_id)
-            return _cond_evaluate(resolved, state)
-        except (ConditionParseError, Exception):
-            logger.debug("Condition parse failed for %r, falling back to legacy", resolved)
-
-    # Legacy dict-based evaluation
-    conditions = phase.conditions
     if not conditions:
         return True
 
@@ -236,6 +223,30 @@ def _conditions_met(
                 return False
 
     return True
+
+
+def _conditions_met(
+    phase: ArcPhaseAST,
+    trust: float,
+    state_vars: dict[str, float],
+    known_facts: set[str],
+    char_id: str = "",
+) -> bool:
+    """Check if all conditions in a phase gate are satisfied.
+
+    Uses the external condition DSL when available, otherwise falls back
+    to effigy's native dict-based evaluator on ``phase.conditions``.
+    """
+    cond_str = phase.condition_str
+    if cond_str and _HAS_CONDITIONS:
+        resolved = cond_str.replace("_NPC_", char_id) if char_id else cond_str
+        try:
+            state = _EffigyConditionState(trust, state_vars, known_facts, char_id)
+            return _cond_evaluate(resolved, state)
+        except (ConditionParseError, Exception):
+            logger.debug("Condition parse failed for %r, falling back to legacy", resolved)
+
+    return _evaluate_conditions_dict(phase.conditions, trust, state_vars, known_facts)
 
 
 def _check_comparison(actual: float, spec: dict) -> bool:
@@ -424,11 +435,12 @@ def _evaluate_condition_string(
     known_facts: set[str] | None,
     char_id: str = "",
 ) -> bool:
-    """Evaluate a standalone condition DSL string (e.g., voice.peak_when).
+    """Evaluate a standalone condition string (voice.peak_when, @when gates).
 
-    Returns False when the external conditions library is unavailable or
-    the condition fails to parse. Used for non-arc-phase conditions that
-    need to reuse the same DSL.
+    Uses the external condition DSL when available; otherwise parses the
+    string with effigy's native ``_parse_conditions`` grammar (the same
+    grammar ARC blocks use) and evaluates via ``_evaluate_conditions_dict``.
+    Returns False if neither path can parse the condition.
     """
     if not cond_str:
         return False
@@ -440,9 +452,140 @@ def _evaluate_condition_string(
             state = _EffigyConditionState(trust, state_vars, known_facts, char_id)
             return bool(_cond_evaluate(resolved, state))
         except Exception:
-            logger.debug("condition string parse failed for %r", resolved)
-            return False
-    return False
+            logger.debug("DSL eval failed for %r, falling back to native", resolved)
+
+    # Native fallback: parse with effigy's own grammar and evaluate.
+    from effigy.parser import _parse_conditions
+
+    try:
+        conds = _parse_conditions(cond_str)
+    except Exception:
+        logger.debug("native condition parse failed for %r", cond_str)
+        return False
+    if not conds:
+        return False
+    return _evaluate_conditions_dict(conds, trust, state_vars, known_facts)
+
+
+def _when_matches(
+    when: str,
+    trust: float,
+    state_vars: dict[str, float] | None,
+    known_facts: set[str] | None,
+    char_id: str = "",
+) -> bool:
+    """Evaluate a ``@when`` condition string. Empty or ``"*"`` means always-on.
+
+    ``_evaluate_condition_string`` handles both the external DSL library
+    (when installed) and effigy's native grammar fallback, so this path
+    works standalone without a runtime dependency on ``stope.conditions``.
+    """
+    if not when or when.strip() == "*":
+        return True
+    return _evaluate_condition_string(when, trust, state_vars, known_facts, char_id)
+
+
+def filter_ast_by_state(
+    ast: CharacterAST,
+    trust: float = 0.0,
+    *,
+    state_vars: dict[str, float] | None = None,
+    known_facts: set[str] | None = None,
+) -> CharacterAST:
+    """Return a new CharacterAST with ``@when``-gated items pruned by state.
+
+    This is the v0.5.0 pre-filter pass. Callers run it BEFORE
+    ``build_static_context`` and ``build_dynamic_state`` so both builders
+    consume an already-filtered AST. The static context remains
+    byte-stable for a given filtered AST; the cache key is the filtered
+    AST's identity (or hash), not the raw state params.
+
+    Filters items with a ``@when`` gate across:
+      * ``ast.mes_examples``
+      * ``ast.never_would_say``
+      * ``ast.wrong_examples``
+      * ``ast.tests``
+
+    Items without ``@when`` are always retained. Conditions are evaluated
+    with the external DSL library when available, otherwise with effigy's
+    native ``_parse_conditions`` grammar (same syntax as ARC phase gates).
+    Unparseable conditions are treated as unmet (item dropped).
+
+    This function does not mutate ``ast``. Items not subject to
+    ``@when`` filtering are shared by reference with the input AST.
+    """
+    import dataclasses
+
+    char_id = getattr(ast, "char_id", "") or getattr(ast, "name", "") or ""
+
+    def keep(item) -> bool:
+        when = getattr(item, "when", "")
+        return not when or _when_matches(when, trust, state_vars, known_facts, char_id)
+
+    return dataclasses.replace(
+        ast,
+        mes_examples=[e for e in ast.mes_examples if keep(e)],
+        never_would_say=[n for n in ast.never_would_say if keep(n)],
+        wrong_examples=[w for w in ast.wrong_examples if keep(w)],
+        tests=[t for t in ast.tests if keep(t)],
+    )
+
+
+def validate_when_conditions(ast: CharacterAST) -> list[str]:
+    """Return parse errors for all ``@when`` conditions in the AST.
+
+    Empty list means every condition parses cleanly. Used as a pre-commit
+    check to catch typos like ``@when trsut>=0.6`` at author time rather
+    than at runtime (where the silent failure would be "item disappears").
+
+    When the external DSL library is available it's used for validation;
+    otherwise the native ``_parse_conditions`` grammar is used. The native
+    grammar covers everything ARC blocks accept (trust/state_var
+    comparisons, ``fact:``, ``AND``), so this works standalone.
+    """
+    from effigy.parser import _parse_conditions
+
+    errors: list[str] = []
+    char_id = getattr(ast, "char_id", "") or ""
+
+    def all_whens():
+        for i, ex in enumerate(ast.mes_examples):
+            yield f"MES[{i}]", getattr(ex, "when", "")
+        for i, rule in enumerate(ast.never_would_say):
+            yield f"NEVER[{i}]", getattr(rule, "when", "")
+        for i, we in enumerate(ast.wrong_examples):
+            yield f"WRONG[{i}]", getattr(we, "when", "")
+        for i, t in enumerate(ast.tests):
+            yield f"TEST[{i}]", getattr(t, "when", "")
+
+    for label, when in all_whens():
+        if not when or when.strip() == "*":
+            continue
+        if _HAS_CONDITIONS:
+            resolved = when.replace("_NPC_", char_id) if char_id else when
+            try:
+                state = _EffigyConditionState(0.0, {}, set(), char_id)
+                _cond_evaluate(resolved, state)
+                continue
+            except ConditionParseError as e:
+                errors.append(f"{label}: {when!r}: {e}")
+                continue
+            except Exception:
+                pass  # fall through to native check
+        # Native: parseable means at least one condition was extracted
+        # AND no "raw" (unrecognized) parts snuck through.
+        try:
+            conds = _parse_conditions(when)
+        except Exception as e:
+            errors.append(f"{label}: {when!r}: {e}")
+            continue
+        if not conds:
+            errors.append(f"{label}: {when!r}: no recognizable conditions")
+        elif "raw" in conds:
+            errors.append(
+                f"{label}: {when!r}: unrecognized parts {conds['raw']!r}"
+            )
+    return errors
 
 
 def _compress_drivermap_profile(profile: dict[str, str]) -> str:
@@ -465,6 +608,9 @@ def _compress_drivermap_profile(profile: dict[str, str]) -> str:
 def build_static_context(
     ast: CharacterAST,
     *,
+    voice_override: str | None = None,
+    suppress_peak: bool = True,
+    mes_override: list[str] | None = None,
     _debug: dict | None = None,
 ) -> str:
     """Turn-invariant character definition — the cacheable prefix.
@@ -478,6 +624,16 @@ def build_static_context(
     props → relationships → traits → drivermap.
 
     Args:
+        voice_override: If provided, replaces ``ast.voice.kernel`` in the
+            rendered ``<voice>`` block. Use when a late-arc phase voice
+            should dominate the entire prompt rather than compete with
+            the guarded-phase kernel. Cache key changes per override.
+        suppress_peak: When ``voice_override`` is set, suppress the
+            ``<peak>`` element (peak contrasts kernel; when kernel IS the
+            phase voice, peak becomes noise). Defaults True. Set False to
+            keep peak rendering alongside the override.
+        mes_override: If provided, replaces the canonical MES slice.
+            Typically phase-appropriate examples computed by the caller.
         _debug: Optional dict; when provided, populated with per-section
             observability data (section names emitted, counts, truncation
             info). Public callers should use build_dialogue_context_debug
@@ -492,7 +648,26 @@ def build_static_context(
         dbg_sections.append("presence")
 
     # --- Voice (kernel + optional peak + peak_when condition) ---
-    if ast.voice and ast.voice.kernel:
+    if voice_override:
+        voice_lines = ["<voice>", f"  <kernel>{voice_override}</kernel>"]
+        has_peak = False
+        if not suppress_peak and ast.voice and ast.voice.peak:
+            has_peak = True
+            peak_attr = ""
+            if ast.voice.peak_when:
+                peak_attr = f' when="{ast.voice.peak_when}"'
+            voice_lines.append(f"  <peak{peak_attr}>{ast.voice.peak}</peak>")
+        voice_lines.append("</voice>")
+        sections.append("\n".join(voice_lines))
+        dbg_sections.append("voice")
+        if _debug is not None:
+            _debug["voice_kernel_chars"] = len(voice_override)
+            _debug["has_peak"] = has_peak
+            _debug["has_peak_when"] = bool(
+                ast.voice.peak_when if ast.voice else False
+            )
+            _debug["voice_override"] = True
+    elif ast.voice and ast.voice.kernel:
         voice_lines = ["<voice>", f"  <kernel>{ast.voice.kernel}</kernel>"]
         has_peak = False
         if ast.voice.peak:
@@ -510,7 +685,7 @@ def build_static_context(
             _debug["has_peak_when"] = bool(ast.voice.peak_when)
 
     # --- Canonical voice examples (cache-stable MES slice) ---
-    canonical_mes = select_canonical_mes(ast)
+    canonical_mes = mes_override if mes_override is not None else select_canonical_mes(ast)
     if canonical_mes:
         ex_lines = ['<voice_examples canonical="true">']
         for ex in canonical_mes:
@@ -526,10 +701,11 @@ def build_static_context(
     # Strip inline WRONG/RIGHT/NOT/YES example blocks from each rule
     # (same priming problem as standalone WRONG examples).
     if ast.never_would_say:
-        critical = [n for n in ast.never_would_say if n.upper().startswith("CRITICAL:")]
-        regular = [n for n in ast.never_would_say if not n.upper().startswith("CRITICAL:")]
+        critical = [n for n in ast.never_would_say if n.text.upper().startswith("CRITICAL:")]
+        regular = [n for n in ast.never_would_say if not n.text.upper().startswith("CRITICAL:")]
         prioritized = (critical + regular)[:MAX_NEVER_RULES]
-        stripped = [_strip_inline_examples(n) for n in prioritized]
+        prioritized_text = [n.text for n in prioritized]
+        stripped = [_strip_inline_examples(t) for t in prioritized_text]
         # Drop rules that became empty after stripping (authoring error).
         stripped = [s for s in stripped if s]
         never_lines = [f"  - {n}" for n in stripped]
@@ -541,7 +717,7 @@ def build_static_context(
             _debug["never_dropped"] = len(ast.never_would_say) - len(stripped)
             _debug["never_critical_count"] = len(critical)
             _debug["never_inline_examples_stripped"] = sum(
-                1 for p, s in zip(prioritized, stripped) if p != s
+                1 for p, s in zip(prioritized_text, stripped) if p != s
             )
 
     # --- Reasoning tests (contextual quality checks) ---
@@ -616,6 +792,7 @@ def build_dynamic_state(
     turn: int = 0,
     state_vars: dict[str, float] | None = None,
     uncertain: bool = False,
+    voice_reminder_override: str | None = None,
     _debug: dict | None = None,
 ) -> str:
     """Per-turn state context — recomputed every generation call.
@@ -700,8 +877,14 @@ def build_dynamic_state(
 
     # --- Voice reminder (sandwich: last thing before generation) ---
     # Counters lost-in-the-middle. Swaps to voice.peak when peak_when
-    # condition evaluates true; otherwise uses kernel.
-    if ast.voice and ast.voice.kernel:
+    # condition evaluates true; otherwise uses kernel. Override wins.
+    if voice_reminder_override:
+        sections.append(f"<voice_reminder>{voice_reminder_override}</voice_reminder>")
+        dbg_sections.append("voice_reminder")
+        if _debug is not None:
+            _debug["voice_reminder_peak"] = False
+            _debug["voice_reminder_override"] = True
+    elif ast.voice and ast.voice.kernel:
         active_voice = ast.voice.kernel
         peak_active = False
         if ast.voice.peak and ast.voice.peak_when:
@@ -738,6 +921,11 @@ def build_dialogue_context(
     turn: int = 0,
     state_vars: dict[str, float] | None = None,
     uncertain: bool = False,
+    *,
+    voice_override: str | None = None,
+    suppress_peak: bool = True,
+    mes_override: list[str] | None = None,
+    voice_reminder_override: str | None = None,
 ) -> str:
     """Build the complete effigy context for injection into a dialogue system.
 
@@ -755,14 +943,23 @@ def build_dialogue_context(
         state_vars: Arbitrary numeric state variables (e.g., {"ruin": 4}).
         uncertain: When True, emit uncertainty-voice examples (opt-in).
     """
-    static = build_static_context(ast)
+    filtered = filter_ast_by_state(
+        ast, trust, state_vars=state_vars, known_facts=known_facts
+    )
+    static = build_static_context(
+        filtered,
+        voice_override=voice_override,
+        suppress_peak=suppress_peak,
+        mes_override=mes_override,
+    )
     dynamic = build_dynamic_state(
-        ast,
+        filtered,
         trust=trust,
         known_facts=known_facts,
         turn=turn,
         state_vars=state_vars,
         uncertain=uncertain,
+        voice_reminder_override=voice_reminder_override,
     )
     parts = [p for p in (static, dynamic) if p]
     return "\n\n".join(parts)
@@ -775,6 +972,11 @@ def build_dialogue_context_debug(
     turn: int = 0,
     state_vars: dict[str, float] | None = None,
     uncertain: bool = False,
+    *,
+    voice_override: str | None = None,
+    suppress_peak: bool = True,
+    mes_override: list[str] | None = None,
+    voice_reminder_override: str | None = None,
 ) -> tuple[str, dict]:
     """Build the dialogue context AND return a debug dict of what went in.
 
@@ -784,7 +986,8 @@ def build_dialogue_context_debug(
     ``{
         "static": {
             "sections": [...], "voice_kernel_chars": N, "has_peak": bool,
-            "has_peak_when": bool, "mes_canonical_count": N,
+            "has_peak_when": bool, "voice_override": bool,
+            "mes_canonical_count": N,
             "never_total": N, "never_rendered": N, "never_dropped": N,
             "never_critical_count": N, "relationships_count": N,
         },
@@ -792,9 +995,12 @@ def build_dialogue_context_debug(
             "sections": [...], "arc_phase": str, "arc_condition": str,
             "active_goals": [{"name", "weight", "has_behavior"}],
             "mes_rotating_count": N, "voice_reminder_peak": bool,
+            "voice_reminder_override": bool,
             "uncertain": bool, "trust": float, "turn": int,
             "state_vars": dict,
         },
+        "when_filtered_mes": N, "when_filtered_never": N,
+        "when_filtered_wrong": N, "when_filtered_tests": N,
         "total_chars": N, "static_chars": N, "dynamic_chars": N,
     }``
 
@@ -803,14 +1009,28 @@ def build_dialogue_context_debug(
     the best voice adherence.
     """
     debug: dict = {"static": {}, "dynamic": {}}
-    static = build_static_context(ast, _debug=debug["static"])
+    filtered = filter_ast_by_state(
+        ast, trust, state_vars=state_vars, known_facts=known_facts
+    )
+    debug["when_filtered_mes"] = len(ast.mes_examples) - len(filtered.mes_examples)
+    debug["when_filtered_never"] = len(ast.never_would_say) - len(filtered.never_would_say)
+    debug["when_filtered_wrong"] = len(ast.wrong_examples) - len(filtered.wrong_examples)
+    debug["when_filtered_tests"] = len(ast.tests) - len(filtered.tests)
+    static = build_static_context(
+        filtered,
+        voice_override=voice_override,
+        suppress_peak=suppress_peak,
+        mes_override=mes_override,
+        _debug=debug["static"],
+    )
     dynamic = build_dynamic_state(
-        ast,
+        filtered,
         trust=trust,
         known_facts=known_facts,
         turn=turn,
         state_vars=state_vars,
         uncertain=uncertain,
+        voice_reminder_override=voice_reminder_override,
         _debug=debug["dynamic"],
     )
     parts = [p for p in (static, dynamic) if p]

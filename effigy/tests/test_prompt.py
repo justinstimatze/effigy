@@ -998,10 +998,9 @@ class TestPhase0Surfaced:
     def test_voice_reminder_swaps_to_peak_when_condition_true(self):
         """When peak_when evaluates true, voice_reminder uses peak voice.
 
-        Depends on the external stope.conditions library being installed;
-        skips gracefully otherwise.
+        Works standalone via effigy's native condition evaluator — no
+        external DSL library needed for the grammar ARC blocks already use.
         """
-        pytest.importorskip("stope.conditions")
         ctx = build_dynamic_state(self.ast, trust=0.0, state_vars={"ruin": 5})
         assert '<voice_reminder peak="true">' in ctx
         assert "Cuts her own sentence" in ctx
@@ -1110,3 +1109,377 @@ class TestDebugDict:
             self.ast, trust=0.0, state_vars={"ruin": 0}
         )
         assert debug["dynamic"]["voice_reminder_peak"] is False
+
+
+# ---------------------------------------------------------------------------
+# v0.4.1: Tier 1 override API — phase-sliced context via explicit overrides
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseSlicedContext:
+    def setup_method(self):
+        self.ast = parse(PHASE0_NOTATION)
+
+    def test_voice_override_replaces_kernel(self):
+        ctx = build_static_context(self.ast, voice_override="PHASE VOICE")
+        assert "<kernel>PHASE VOICE</kernel>" in ctx
+        assert "Brisk, warm" not in ctx
+
+    def test_voice_override_suppresses_peak_by_default(self):
+        ctx = build_static_context(self.ast, voice_override="PHASE VOICE")
+        assert "<peak" not in ctx
+        assert "Cuts her own sentence" not in ctx
+
+    def test_voice_override_keeps_peak_when_not_suppressed(self):
+        ctx = build_static_context(
+            self.ast, voice_override="PHASE VOICE", suppress_peak=False
+        )
+        assert "<peak" in ctx
+        assert "Cuts her own sentence" in ctx
+
+    def test_mes_override_replaces_canonical(self):
+        override = ["{{char}}: Override one.", "{{char}}: Override two."]
+        ctx = build_static_context(self.ast, mes_override=override)
+        assert "Override one." in ctx
+        assert "Override two." in ctx
+        assert "Coffee's fresh" not in ctx
+        assert "Counter's clean" not in ctx
+
+    def test_mes_override_empty_list_suppresses_canonical(self):
+        ctx = build_static_context(self.ast, mes_override=[])
+        assert '<voice_examples canonical="true">' not in ctx
+
+    def test_voice_reminder_override_used(self):
+        ctx = build_dynamic_state(
+            self.ast, voice_reminder_override="RESOLVED REMINDER"
+        )
+        assert "<voice_reminder>RESOLVED REMINDER</voice_reminder>" in ctx
+        assert "Brisk, warm" not in ctx
+
+    def test_voice_reminder_override_skips_peak_swap(self):
+        """Override takes precedence over peak_when evaluation."""
+        ctx = build_dynamic_state(
+            self.ast,
+            trust=0.0,
+            state_vars={"ruin": 5},
+            voice_reminder_override="OVERRIDE",
+        )
+        assert "<voice_reminder>OVERRIDE</voice_reminder>" in ctx
+        assert 'peak="true"' not in ctx
+
+    def test_no_override_preserves_behavior(self):
+        assert build_static_context(self.ast) == build_static_context(
+            self.ast, voice_override=None, mes_override=None
+        )
+
+    def test_debug_reflects_mes_override_count(self):
+        _, debug = build_dialogue_context_debug(
+            self.ast, mes_override=["a", "b", "c"]
+        )
+        assert debug["static"]["mes_canonical_count"] == 3
+
+    def test_debug_records_override_flags(self):
+        _, debug = build_dialogue_context_debug(
+            self.ast,
+            voice_override="OVR",
+            voice_reminder_override="OVR REMIND",
+        )
+        assert debug["static"].get("voice_override") is True
+        assert debug["dynamic"].get("voice_reminder_override") is True
+
+    def test_full_context_threads_overrides(self):
+        ctx = build_dialogue_context(
+            self.ast,
+            trust=0.6,
+            voice_override="RESOLVED VOICE",
+            mes_override=["{{char}}: Resolved example"],
+            voice_reminder_override="RESOLVED VOICE",
+        )
+        # kernel + voice_reminder both show resolved
+        assert ctx.count("RESOLVED VOICE") == 2
+        assert "Resolved example" in ctx
+        assert "Coffee's fresh" not in ctx
+
+
+# ---------------------------------------------------------------------------
+# v0.5.0: filter_ast_by_state pre-filter + @when on MES + NeverRuleAST
+# ---------------------------------------------------------------------------
+
+
+WHEN_NOTATION = """
+@id betty
+@name Betty
+
+VOICE{
+  kernel: Brisk, warm.
+}
+
+MES[
+{{char}}: Always shown.
+---
+@when trust<0.3
+{{char}}: Low trust only.
+---
+@when trust>=0.6 AND ruin>=4
+{{char}}: Resolved only.
+---
+@when *
+{{char}}: Universal.
+]
+
+NEVER[
+Never mentions the mine
+---
+@when trust>=0.6
+Never volunteers information
+]
+"""
+
+
+class TestWhenOnMES:
+    def setup_method(self):
+        self.ast = parse(WHEN_NOTATION)
+
+    def test_mes_when_parsed(self):
+        exs = self.ast.mes_examples
+        assert len(exs) == 4
+        assert exs[0].when == ""
+        assert exs[1].when == "trust<0.3"
+        assert exs[2].when == "trust>=0.6 AND ruin>=4"
+        assert exs[3].when == "*"
+
+
+class TestFilterAstByState:
+    def setup_method(self):
+        self.ast = parse(WHEN_NOTATION)
+
+    def test_low_trust_filter(self):
+        """Native fallback handles trust comparisons without stope.conditions."""
+        from effigy.prompt import filter_ast_by_state
+
+        filtered = filter_ast_by_state(self.ast, trust=0.0)
+        texts = [e.text for e in filtered.mes_examples]
+        assert any("Always shown" in t for t in texts)
+        assert any("Low trust only" in t for t in texts)
+        assert any("Universal" in t for t in texts)
+        assert not any("Resolved only" in t for t in texts)
+
+    def test_resolved_filter(self):
+        from effigy.prompt import filter_ast_by_state
+
+        filtered = filter_ast_by_state(
+            self.ast, trust=0.7, state_vars={"ruin": 5}
+        )
+        texts = [e.text for e in filtered.mes_examples]
+        assert any("Always shown" in t for t in texts)
+        assert any("Resolved only" in t for t in texts)
+        assert any("Universal" in t for t in texts)
+        assert not any("Low trust only" in t for t in texts)
+
+    def test_no_when_always_retained(self):
+        """Items without @when should always pass through."""
+        from effigy.prompt import filter_ast_by_state
+
+        filtered = filter_ast_by_state(self.ast, trust=0.0)
+        texts = [e.text for e in filtered.mes_examples]
+        assert any("Always shown" in t for t in texts)
+
+    def test_filter_does_not_mutate_input(self):
+        from effigy.prompt import filter_ast_by_state
+
+        before = len(self.ast.mes_examples)
+        filter_ast_by_state(self.ast, trust=0.0)
+        assert len(self.ast.mes_examples) == before
+
+    def test_works_without_dsl_library(self, monkeypatch):
+        """Native fallback exercised explicitly with _HAS_CONDITIONS=False."""
+        import effigy.prompt as P
+        from effigy.prompt import filter_ast_by_state
+
+        monkeypatch.setattr(P, "_HAS_CONDITIONS", False)
+        filtered = filter_ast_by_state(
+            self.ast, trust=0.7, state_vars={"ruin": 5}
+        )
+        texts = [e.text for e in filtered.mes_examples]
+        assert any("Resolved only" in t for t in texts)
+        assert not any("Low trust only" in t for t in texts)
+
+    def test_debug_records_when_filtered_count(self):
+        _, debug = build_dialogue_context_debug(self.ast, trust=0.0)
+        # trust=0.0: drops "Resolved only". "Low trust only" passes.
+        assert debug.get("when_filtered_mes") == 1
+
+
+class TestNeverRuleAST:
+    def test_never_rules_have_when_field(self):
+        ast = parse(WHEN_NOTATION)
+        assert len(ast.never_would_say) == 2
+        assert ast.never_would_say[0].text == "Never mentions the mine"
+        assert ast.never_would_say[0].when == ""
+        assert ast.never_would_say[1].when == "trust>=0.6"
+
+    def test_never_rule_str_returns_text(self):
+        ast = parse(WHEN_NOTATION)
+        assert str(ast.never_would_say[0]) == "Never mentions the mine"
+
+    def test_never_rules_still_rendered_into_context(self):
+        """NEVER @when not filtered unless build_dialogue_context is used."""
+        ast = parse(WHEN_NOTATION)
+        ctx = build_static_context(ast)
+        assert "Never mentions the mine" in ctx
+        assert "Never volunteers information" in ctx
+
+
+# ---------------------------------------------------------------------------
+# v0.5.x: @when on NEVER, WRONG, TEST + validate_when_conditions
+# ---------------------------------------------------------------------------
+
+
+WHEN_FULL_NOTATION = """
+@id x
+
+VOICE{
+  kernel: Voice.
+}
+
+NEVER[
+Always on rule
+---
+@when trust>=0.6
+High trust rule
+]
+
+WRONG[
+{{user}}: q1
+WRONG: "low wrong"
+RIGHT: "low right"
+WHY: always
+---
+@when trust>=0.6
+{{user}}: q2
+WRONG: "high wrong"
+RIGHT: "high right"
+WHY: resolved
+]
+
+TEST[
+  name: ALWAYS TEST
+  question: Does it always?
+  pass: "yes"
+  why: always-on
+---
+  @when trust>=0.6
+  name: HIGH TEST
+  question: Does it at high trust?
+  pass: "yes"
+  why: high-only
+]
+"""
+
+
+class TestWhenOnNeverWrongTest:
+    def test_never_when_parsed(self):
+        ast = parse(WHEN_FULL_NOTATION)
+        assert len(ast.never_would_say) == 2
+        assert ast.never_would_say[0].when == ""
+        assert ast.never_would_say[1].when == "trust>=0.6"
+
+    def test_wrong_when_parsed(self):
+        ast = parse(WHEN_FULL_NOTATION)
+        assert len(ast.wrong_examples) == 2
+        assert ast.wrong_examples[0].when == ""
+        assert ast.wrong_examples[1].when == "trust>=0.6"
+
+    def test_test_when_parsed(self):
+        ast = parse(WHEN_FULL_NOTATION)
+        assert len(ast.tests) == 2
+        assert ast.tests[0].when == ""
+        assert ast.tests[1].when == "trust>=0.6"
+
+    def test_filter_prunes_never_at_low_trust(self):
+        from effigy.prompt import filter_ast_by_state
+
+        ast = parse(WHEN_FULL_NOTATION)
+        filtered = filter_ast_by_state(ast, trust=0.0)
+        texts = [n.text for n in filtered.never_would_say]
+        assert "Always on rule" in texts
+        assert "High trust rule" not in texts
+
+    def test_filter_prunes_wrong_at_low_trust(self):
+        from effigy.prompt import filter_ast_by_state
+
+        ast = parse(WHEN_FULL_NOTATION)
+        filtered = filter_ast_by_state(ast, trust=0.0)
+        whys = [w.why for w in filtered.wrong_examples]
+        assert "always" in whys
+        assert "resolved" not in whys
+
+    def test_filter_prunes_tests_at_low_trust(self):
+        from effigy.prompt import filter_ast_by_state
+
+        ast = parse(WHEN_FULL_NOTATION)
+        filtered = filter_ast_by_state(ast, trust=0.0)
+        names = [t.name for t in filtered.tests]
+        assert "ALWAYS TEST" in names
+        assert "HIGH TEST" not in names
+
+    def test_filter_keeps_all_at_high_trust(self):
+        from effigy.prompt import filter_ast_by_state
+
+        ast = parse(WHEN_FULL_NOTATION)
+        filtered = filter_ast_by_state(ast, trust=0.7)
+        assert len(filtered.never_would_say) == 2
+        assert len(filtered.wrong_examples) == 2
+        assert len(filtered.tests) == 2
+
+    def test_debug_records_filter_counts(self):
+        ast = parse(WHEN_FULL_NOTATION)
+        _, debug = build_dialogue_context_debug(ast, trust=0.0)
+        assert debug["when_filtered_never"] == 1
+        assert debug["when_filtered_wrong"] == 1
+        assert debug["when_filtered_tests"] == 1
+
+
+class TestValidateWhenConditions:
+    def test_valid_conditions_return_empty_list(self):
+        from effigy.prompt import validate_when_conditions
+
+        ast = parse(WHEN_FULL_NOTATION)
+        assert validate_when_conditions(ast) == []
+
+    def test_ast_without_when_returns_empty_without_lib(self, monkeypatch):
+        """No @when gates → no lib needed → returns []."""
+        import effigy.prompt as P
+        from effigy.prompt import validate_when_conditions
+
+        monkeypatch.setattr(P, "_HAS_CONDITIONS", False)
+        ast = parse("@id x\nNEVER[\nNever shouts\n]\n")
+        assert validate_when_conditions(ast) == []
+
+    def test_ast_with_when_validates_without_lib(self, monkeypatch):
+        """Native grammar validates parseable conditions without the DSL lib."""
+        import effigy.prompt as P
+        from effigy.prompt import validate_when_conditions
+
+        monkeypatch.setattr(P, "_HAS_CONDITIONS", False)
+        ast = parse(WHEN_FULL_NOTATION)
+        # Everything in the fixture is native-parseable (trust>=X).
+        assert validate_when_conditions(ast) == []
+
+    def test_unparseable_condition_reported(self, monkeypatch):
+        """Gibberish @when lines get flagged with MES/NEVER/... label."""
+        import effigy.prompt as P
+        from effigy.prompt import validate_when_conditions
+
+        monkeypatch.setattr(P, "_HAS_CONDITIONS", False)
+        bad = """
+@id x
+MES[
+@when !!!garbage!!!
+{{char}}: typo
+]
+"""
+        ast = parse(bad)
+        errors = validate_when_conditions(ast)
+        assert errors, "expected at least one error for unparseable condition"
+        assert any("MES" in err for err in errors)

@@ -383,7 +383,7 @@ NEVER[
 """
         ast = parse(text)
         assert len(ast.never_would_say) == 3
-        assert "journalistic" in ast.never_would_say[0]
+        assert "journalistic" in ast.never_would_say[0].text
 
     def test_empty_never(self):
         text = "@id x\nNEVER[\n]\n"

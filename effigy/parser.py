@@ -31,6 +31,7 @@ from effigy.notation import (
     EraStateAST,
     GoalAST,
     NarrativeRole,
+    NeverRuleAST,
     PostProcRuleAST,
     RelationshipAST,
     ScheduleAST,
@@ -266,10 +267,11 @@ def _parse_traits_block(content: str) -> list[str]:
 
 @dataclass
 class MESExample:
-    """A single MES dialogue example with optional trust tier."""
+    """A single MES dialogue example with optional trust tier and @when gate."""
 
     text: str
     tier: str = "any"  # "low", "moderate", "high", or "any"
+    when: str = ""  # condition DSL string; empty or "*" = always active
 
 
 def _parse_mes_block(content: str) -> list[MESExample]:
@@ -282,23 +284,29 @@ def _parse_mes_block(content: str) -> list[MESExample]:
       1. Structured: ``@tier low`` line before the example
       2. Convention: ``# LOW TRUST:`` comment line (legacy)
     """
-    # Split on --- but preserve @tier and # TRUST annotations
-    items: list[tuple[list[str], str]] = []
+    # Split on --- but preserve @tier, @when, and # TRUST annotations
+    items: list[tuple[list[str], str, str]] = []
     current_lines: list[str] = []
     current_tier = "any"
+    current_when = ""
     for line in content.split("\n"):
         stripped = line.strip()
         if stripped == "---":
             if current_lines:
-                items.append((current_lines, current_tier))
+                items.append((current_lines, current_tier, current_when))
                 current_lines = []
                 current_tier = "any"  # reset for next item
+                current_when = ""
             continue
         # Structured tier annotation
         if stripped.startswith("@tier"):
             tier_val = stripped[5:].strip().lower()
             if tier_val in ("low", "moderate", "high"):
                 current_tier = tier_val
+            continue
+        # @when condition gate — same DSL as ARC phases
+        if stripped.startswith("@when"):
+            current_when = stripped[5:].strip()
             continue
         # Legacy comment-based tier annotation
         if stripped.startswith("#"):
@@ -314,10 +322,10 @@ def _parse_mes_block(content: str) -> list[MESExample]:
         if stripped:
             current_lines.append(line)
     if current_lines:
-        items.append((current_lines, current_tier))
+        items.append((current_lines, current_tier, current_when))
 
     result: list[MESExample] = []
-    for lines, tier in items:
+    for lines, tier, when in items:
         clean = [l.strip() for l in lines if l.strip()]
         if not clean:
             continue
@@ -328,7 +336,7 @@ def _parse_mes_block(content: str) -> list[MESExample]:
             text = " ".join(clean)
             if not text.startswith("{{char}}:"):
                 text = "{{char}}: " + text
-        result.append(MESExample(text=text, tier=tier))
+        result.append(MESExample(text=text, tier=tier, when=when))
     return result
 
 
@@ -717,6 +725,33 @@ def _parse_lines_block(content: str) -> list[str]:
     return result
 
 
+def _parse_never_block(content: str) -> list[NeverRuleAST]:
+    """Parse NEVER[...] — NEVER rules separated by ``---`` with optional @when.
+
+    Each entry may be preceded by a ``@when <condition>`` line that gates
+    the rule. The condition DSL is the same as ARC phase gates
+    (``trust>=0.6``, ``ruin>=4``, ``fact:foo``, ``AND``, ``*`` for always).
+    Lines starting with ``#`` are comments and ignored.
+    """
+    items = _split_items(content)
+    result: list[NeverRuleAST] = []
+    for item in items:
+        when = ""
+        text_lines: list[str] = []
+        for raw in item.strip().split("\n"):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("@when"):
+                when = line[5:].strip()
+                continue
+            text_lines.append(line)
+        text = " ".join(text_lines)
+        if text:
+            result.append(NeverRuleAST(text=text, when=when))
+    return result
+
+
 def _parse_wrong_block(content: str) -> list[WrongExampleAST]:
     """Parse WRONG[...] -- anti-pattern examples separated by ---.
 
@@ -735,12 +770,15 @@ def _parse_wrong_block(content: str) -> list[WrongExampleAST]:
         wrong = ""
         right = ""
         why = ""
+        when = ""
 
         for line in item.strip().split("\n"):
             line = line.strip()
             if not line:
                 continue
-            if line.startswith("#"):
+            if line.startswith("@when"):
+                when = line[5:].strip()
+            elif line.startswith("#"):
                 # Comment line -- use as context description
                 context = line.lstrip("# ").strip()
             elif line.startswith("{{user}}:"):
@@ -759,6 +797,7 @@ def _parse_wrong_block(content: str) -> list[WrongExampleAST]:
                     wrong=wrong,
                     right=right,
                     why=why,
+                    when=when,
                 )
             )
 
@@ -786,10 +825,14 @@ def _parse_test_block(content: str) -> list[TestAST]:
         fail_examples: list[str] = []
         pass_examples: list[str] = []
         why = ""
+        when = ""
 
         for line in item.strip().split("\n"):
             line = line.strip()
             if not line or line.startswith("#"):
+                continue
+            if line.startswith("@when"):
+                when = line[5:].strip()
                 continue
             low = line.lower()
             if low.startswith("name:"):
@@ -814,6 +857,7 @@ def _parse_test_block(content: str) -> list[TestAST]:
                     pass_examples=pass_examples,
                     why=why,
                     dimension=dimension,
+                    when=when,
                 )
             )
 
@@ -861,7 +905,7 @@ def parse(text: str) -> CharacterAST:
         elif word == "NEVER":
             state.advance(len(word))
             content = _read_bracketed_block(state)
-            ast.never_would_say = _parse_lines_block(content)
+            ast.never_would_say = _parse_never_block(content)
         elif word == "QUIRKS":
             state.advance(len(word))
             content = _read_bracketed_block(state)

@@ -17,9 +17,8 @@ from effigy.expand import expand
 from effigy.parser import parse
 from effigy.prompt import (
     build_dialogue_context,
-    resolve_active_goals,
+    filter_ast_by_state,
     resolve_arc_phase,
-    select_mes_examples,
 )
 
 EFFIGY_PATH = Path(__file__).parent / "effigy" / "tests" / "fixtures" / "test_npc.effigy"
@@ -58,23 +57,33 @@ def _extract_facts(ast, raw_text: str) -> dict:
     Returns a dict of facts the LLM should weave into the README.
     No prose — just data.
     """
-    # Layer 2 output at thawing phase
-    ctx = build_dialogue_context(
-        ast, trust=0.3,
-        known_facts={"knows_her_name"},
-        turn=5, state_vars={"ruin": 2},
-    )
-
-    # Arc phases at different trust levels
-    phases = {}
-    for name, trust, facts, sv in [
+    # Phase-sliced contexts (v0.5.x). Each section of the README gets a
+    # context filtered to the state it narrates — no competing signal
+    # from low-trust MES during the open-phase closing, etc. voice_override
+    # replaces the kernel so the phase voice dominates primacy AND recency.
+    phase_states = [
         ("guarded", 0.0, set(), {"ruin": 1}),
         ("thawing", 0.3, {"knows_her_name"}, {"ruin": 2}),
         ("open", 0.7, {"knows_her_name"}, {"ruin": 4}),
-    ]:
+    ]
+
+    phases: dict[str, str] = {}
+    phase_contexts: dict[str, str] = {}
+    for name, trust, facts, sv in phase_states:
         p = resolve_arc_phase(ast, trust, known_facts=facts, state_vars=sv)
-        if p:
-            phases[name] = p.voice
+        phase_voice = p.voice if p else ""
+        if phase_voice:
+            phases[name] = phase_voice
+        filtered = filter_ast_by_state(ast, trust, state_vars=sv, known_facts=facts)
+        phase_contexts[name] = build_dialogue_context(
+            filtered, trust=trust, known_facts=facts, turn=5, state_vars=sv,
+            voice_override=phase_voice or None,
+            voice_reminder_override=phase_voice or None,
+        ).strip()
+
+    # The thawing context is the one shown verbatim in the Architecture
+    # section — it's the "middle" state a reader can calibrate against.
+    ctx = phase_contexts["thawing"]
 
     # Module docstrings (introspected, not hardcoded)
     import effigy.parser, effigy.expand, effigy.prompt, effigy.evolve
@@ -82,9 +91,9 @@ def _extract_facts(ast, raw_text: str) -> dict:
     import effigy.validators
     modules = {
         "effigy.parser": {"doc": (effigy.parser.__doc__ or "").split("\n")[0], "exports": ["parse", "parse_file", "ParseError"]},
-        "effigy.notation": {"doc": "AST node definitions", "exports": ["CharacterAST", "VoiceAST", "ArcPhaseAST", "GoalAST", "SecretAST", "RelationshipAST", "PostProcRuleAST", "TestAST", "..."]},
+        "effigy.notation": {"doc": "AST node definitions", "exports": ["CharacterAST", "VoiceAST", "ArcPhaseAST", "GoalAST", "SecretAST", "RelationshipAST", "PostProcRuleAST", "TestAST", "NeverRuleAST", "..."]},
         "effigy.expand": {"doc": (effigy.expand.__doc__ or "").split("\n")[0], "exports": ["expand", "expand_to_json"]},
-        "effigy.prompt": {"doc": (effigy.prompt.__doc__ or "").split("\n")[0], "exports": ["build_dialogue_context", "build_static_context", "build_dynamic_state", "build_dialogue_context_debug", "resolve_arc_phase", "resolve_active_goals", "get_arc_phase_dict", "select_mes_examples", "select_canonical_mes", "select_rotating_mes", "get_wrong_examples", "get_tests", "validate_never_budget"]},
+        "effigy.prompt": {"doc": (effigy.prompt.__doc__ or "").split("\n")[0], "exports": ["build_dialogue_context", "build_static_context", "build_dynamic_state", "build_dialogue_context_debug", "filter_ast_by_state", "validate_when_conditions", "resolve_arc_phase", "resolve_active_goals", "get_arc_phase_dict", "select_mes_examples", "select_canonical_mes", "select_rotating_mes", "get_wrong_examples", "get_tests", "validate_never_budget"]},
         "effigy.evolve": {"doc": (effigy.evolve.__doc__ or "").split("\n")[0], "exports": ["compute_emotional_state", "EmotionalState", "compute_intentions", "build_evolution_context", "build_synthesis_prompt"]},
         "effigy.evaluate": {"doc": (effigy.evaluate.__doc__ or "").split("\n")[0], "exports": ["evaluate_effigy_file", "evaluate_tier1", "evaluate_all", "wrong_bleed_score", "voice_drift_score", "compliance_check", "evaluate_generation"]},
         "effigy.validators": {"doc": (effigy.validators.__doc__ or "").split("\n")[0], "exports": ["RegexValidator", "ValidationViolation", "validate", "strip_violations", "validators_from_ast", "has_blocking_violation", "revise_if_violated"]},
@@ -106,6 +115,7 @@ def _extract_facts(ast, raw_text: str) -> dict:
     return {
         "effigy_source": raw_text.strip(),
         "layer2_output": ctx.strip(),
+        "phase_contexts": phase_contexts,
         "arc_phase_voices": phases,
         "modules": modules,
         "cli_commands": cli_commands,
@@ -113,6 +123,7 @@ def _extract_facts(ast, raw_text: str) -> dict:
             "parse": 'from effigy.parser import parse, parse_file\nast = parse(open("innkeeper.effigy").read())\n# or: ast = parse_file("innkeeper.effigy")\nprint(ast.char_id)          # "' + ast.char_id + '"\nprint(ast.voice.kernel)     # "' + (ast.voice.kernel[:40] if ast.voice else '') + '..."\nprint(len(ast.arc_phases))  # ' + str(len(ast.arc_phases)),
             "expand": "from effigy.expand import expand\ndata = expand(ast)",
             "context": 'from effigy.prompt import build_dialogue_context\nctx = build_dialogue_context(ast, trust=0.3, known_facts={"knows_her_name"}, turn=5, state_vars={"ruin": 2})',
+            "phase_slice": 'from effigy.prompt import filter_ast_by_state, build_dialogue_context, resolve_arc_phase\n\n# Prune @when-gated items that don\'t match the current state,\n# then let the phase voice dominate kernel AND voice_reminder.\nfiltered = filter_ast_by_state(ast, trust=0.7, state_vars={"ruin": 4})\nphase = resolve_arc_phase(ast, trust=0.7, state_vars={"ruin": 4})\nctx = build_dialogue_context(\n    filtered, trust=0.7, state_vars={"ruin": 4},\n    voice_override=phase.voice,\n    voice_reminder_override=phase.voice,\n)',
             "evolve": 'from effigy.evolve import build_evolution_context, compute_emotional_state\nstate = compute_emotional_state(ast, known_facts=facts, emotional_inputs={"instability": 0.5})\nctx = build_evolution_context(ast, trust=0.3, state_vars={"ruin": 2})',
         },
         "block_types": [
@@ -136,6 +147,10 @@ def _extract_facts(ast, raw_text: str) -> dict:
             ("ARRIVE[]", "Entrance lines"),
             ("DEPART[]", "Exit lines"),
         ],
+        "annotations": [
+            ("@tier", "Trust-tier gate on MES examples: low / moderate / high / any"),
+            ("@when", "Condition DSL gate on MES, NEVER, WRONG, TEST items (same grammar as ARC conditions)"),
+        ],
         "header_fields": ["@id", "@name", "@role", "@arch", "@narr", "@presence", "@tropes", "@theme"],
         "install": {
             "clone": "git clone https://github.com/justinstimatze/effigy.git\ncd effigy\npip install -e .",
@@ -156,6 +171,8 @@ def _extract_facts(ast, raw_text: str) -> dict:
         "novel": [
             "Trust-gated MES selection",
             "WRONG anti-pattern examples",
+            "TEST blocks — named reasoning tests with fail/pass examples",
+            "@when composable blocks — phase-sliced context via state-gated items",
             "Three-layer runtime architecture",
             "ARC with condition DSL",
             "PROPS for grounding",
@@ -190,10 +207,15 @@ YOUR SOURCE FILE:
 
 {raw_text}
 
-ARC SHIFT across the README:
+ARC SHIFT across the README (each section is written AS IF the library
+had sliced your context for that phase — guarded voice dominates the
+opening, thawing voice dominates the middle, open voice dominates the
+closing). This is not a stylistic suggestion, it's a structural one:
+the library's v0.5 filter_ast_by_state + voice_override APIs exist
+precisely so prompts don't mix phase signals:
 - Opening: {facts['arc_phase_voices'].get('guarded', '')}
 - Middle (after showing your effigy): {facts['arc_phase_voices'].get('thawing', '')}
-- Closing (Influences): {facts['arc_phase_voices'].get('open', '')}
+- Closing (Influences and after): {facts['arc_phase_voices'].get('open', '')}
 
 WRITING RULES:
 - NEVER open with a stage direction. No stage directions AT ALL until after the
@@ -242,9 +264,18 @@ Layer 2 (runtime):       AST + game state  -->  prompt.py (dialogue context)
 Layer 3 (evolution):     AST + history     -->  evolve.py (emotional state, intentions)
 Then brief explanation of each layer. Then the layer2_output in a code fence (VERBATIM).
 Note it fits in a system prompt.
-5. NOTATION SYNTAX: header_fields reference, block_types as markdown table. Link to fixture_path.
+5. NOTATION SYNTAX: header_fields reference, block_types as markdown table.
+Then a short "Annotations" subsection: render `annotations` as a second
+small markdown table (two columns: annotation, purpose). One sentence
+after it explaining how @when composes with @tier (both gate an item;
+@when is the general form). Link to fixture_path.
 6. INSTALLATION: install.clone and install.direct in code fences. install.deps as a note.
-7. QUICK START: code_examples.parse, .expand, .context, .evolve each in code fences (VERBATIM).
+7. QUICK START: code_examples.parse, .expand, .context, .phase_slice, .evolve each in
+code fences (VERBATIM). Between .context and .phase_slice, one sentence
+only: something like "When the character reaches a different arc phase,
+you don't want the earlier phase's voice competing for the model's
+attention. Filter first, override the voice, stop arguing with yourself."
+Stay in character — no API marketing voice.
 8. CONCEPTS: state_vars and emotional_inputs, one paragraph each.
 9. CLI: cli_commands in a single code fence (VERBATIM).
 10. API REFERENCE: modules as markdown table.

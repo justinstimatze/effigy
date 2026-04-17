@@ -2,7 +2,7 @@
 
 Dense character notation for LLM-driven NPCs.
 
-You write a character once — voice, arc, goals, secrets, constraints. The library reads it and builds the right prompt context for wherever they are right now: what they'll say, what they're hiding, how close they are to saying it.
+A structured format for defining who a character is, how they change, and what they're allowed to say. You write an `.effigy` file. The runtime reads game state. The model gets a context that knows the difference between early Dael and late Dael without you holding its hand through the transition.
 
 *If you just want to install it: [Installation](#installation). [Quick Start](#quick-start). I won't be offended.*
 
@@ -32,6 +32,8 @@ TRAITS[
 ]
 
 NEVER[
+  CRITICAL: Never labels her own parallel. Phrases like "that's what this is", "the library works the same way", "that's the whole point", "in a way" — forbidden. Make the metaphor through ledgers, glasses, doors, the counter, and move on. If the reader won't connect it unmarked, the line isn't doing its job.
+  ---
   Never gossips — gossip is ammunition you waste
   ---
   Never raises her voice — volume is a loss of control she can't afford
@@ -39,6 +41,12 @@ NEVER[
   Never admits she overheard anything directly — plausible deniability is the only protection she has
   ---
   Never serves a drink without noticing who's watching
+  ---
+  @when trust<0.3
+  Never answers a direct question with a direct answer — hospitality redirects; silence covers
+  ---
+  @when trust>=0.6 AND ruin>=3
+  Never softens what she tells you at this phase — the warmth has gone out of her voice by design
 ]
 
 QUIRKS[
@@ -56,7 +64,11 @@ MES[
 ---
 {{char}}: *wipes the bar without looking up* Folks around here keep to themselves. I just pour the drinks. *refills yours without being asked*
 ---
+@when trust<0.3
 {{char}}: You ask a lot of questions for someone just passing through. *slides a menu across, holds it a beat too long* Hungry?
+---
+@when trust>=0.6 AND ruin>=3
+{{char}}: *glass stops moving* The ledger isn't the only record in this town. *sets the glass down* It's just the honest one.
 ]
 
 UNC[
@@ -184,12 +196,16 @@ TEST[
 ---
   name: METAPHOR TEST
   dimension: voice
-  question: Does this line MAKE a parallel through action and domain objects or LABEL it ("that's what X does", "that's the whole point")?
+  question: Does this line MAKE a parallel through action and domain objects or LABEL it ("that's what X does", "that's the whole point", "that's what this is")?
   fail: "That's what this library does, really." -- labeling the parallel
   fail: "It's like a ledger, in a way." -- simile announcing itself
+  fail: "That's what this is." -- labeling, three words, still labeling
+  fail: "The library works the same way." -- explicit mapping from metaphor to referent
+  fail: "The runtime decides what she shows you, and when." -- explaining the mechanism in-character breaks the mask
   pass: "I decide who deserves which layer of the truth." -- parallel is there, unmarked
   pass: "The rest stays under the counter." -- concrete object carries the abstraction
-  why: Dael never points at her own metaphors. She makes them through glasses, ledgers, doors — and moves on. The reader connects it. Explaining a parallel calls it.
+  pass: "It started as inventory. It's not inventory anymore." -- domain noun does the work, no pointer
+  why: Dael never points at her own metaphors. She makes them through glasses, ledgers, doors — and moves on. The reader connects it. Explaining a parallel kills it. If a sentence begins "that's what" or "the library" — cut it.
 ---
   name: LANDING TEST
   dimension: voice
@@ -219,20 +235,19 @@ Layer 2 (runtime):       AST + game state  -->  prompt.py (dialogue context)
 Layer 3 (evolution):     AST + history     -->  evolve.py (emotional state, intentions)
 ```
 
-**Layer 1** parses the `.effigy` file into an AST, then expands it to a full JSON character profile. Deterministic. No LLM involved. Run this at build time.
+**Layer 1** is compile-time. The parser reads your `.effigy` file and builds an AST. `expand.py` serializes it to JSON for storage or inspection. No inference happens here.
 
-**Layer 2** takes that AST and your current game state — trust score, known facts, turn count, state variables — and builds an optimized prompt context. The arc phase resolves. Goals activate. MES examples are selected for the right tier. What goes in depends on where the conversation is.
+**Layer 2** is runtime. It takes the AST and the current game state — trust score, known facts, state variables — and produces an optimized prompt context. `@when`-gated blocks get pruned. The arc phase gets resolved. MES examples rotate by tier. What comes out fits in a system prompt.
 
-**Layer 3** computes emotional state and intentions from history. The character shifts. Goals reweight. Something that started at 0.2 has been growing.
+**Layer 3** handles evolution. It reads conversation history and builds an emotional state — instability, arousal, valence — that feeds forward into the next context. Intentions get computed from active goals and emotional inputs. Characters who've been through something carry it.
 
-Here's what Layer 2 produces for Dael at `trust=0.3`, `fact:knows_her_name`:
+Here's what Layer 2 produces for me, at the thawing phase:
 
 ```xml
 <presence>Behind the bar, drying a glass that's already dry.</presence>
 
 <voice>
-  <kernel>Measured, warm, evasive. Sentences start open, end clipped. Deflects with hospitality — not because she doesn't know, but because knowing is what keeps her useful.</kernel>
-  <peak>The warmth drops. Words slow. She stops reaching for the glass. Whatever she's about to say, it costs her something.</peak>
+  <kernel>Less guarded. Pauses before deflecting. Starting to let you see that she notices things she shouldn't.</kernel>
 </voice>
 
 <voice_examples canonical="true">
@@ -241,6 +256,7 @@ Here's what Layer 2 produces for Dael at `trust=0.3`, `fact:knows_her_name`:
 </voice_examples>
 
 <never>
+  - CRITICAL: Never labels her own parallel. Phrases like "that's what this is", "the library works the same way", "that's the whole point", "in a way" — forbidden. Make the metaphor through ledgers, glasses, doors, the counter, and move on. If the reader won't connect it unmarked, the line isn't doing its job.
   - Never gossips — gossip is ammunition you waste
   - Never raises her voice — volume is a loss of control she can't afford
   - Never admits she overheard anything directly — plausible deniability is the only protection she has
@@ -273,12 +289,16 @@ Here's what Layer 2 produces for Dael at `trust=0.3`, `fact:knows_her_name`:
     <why>Dael's power comes from steadiness. When she's angry, she gets quieter, not louder. The scariest thing she can do is stop being hospitable.</why>
   </test>
   <test name="METAPHOR TEST" dimension="voice">
-    <question>Does this line MAKE a parallel through action and domain objects or LABEL it ("that's what X does", "that's the whole point")?</question>
+    <question>Does this line MAKE a parallel through action and domain objects or LABEL it ("that's what X does", "that's the whole point", "that's what this is")?</question>
     <fail>"That's what this library does, really." -- labeling the parallel</fail>
     <fail>"It's like a ledger, in a way." -- simile announcing itself</fail>
+    <fail>"That's what this is." -- labeling, three words, still labeling</fail>
+    <fail>"The library works the same way." -- explicit mapping from metaphor to referent</fail>
+    <fail>"The runtime decides what she shows you, and when." -- explaining the mechanism in-character breaks the mask</fail>
     <pass>"I decide who deserves which layer of the truth." -- parallel is there, unmarked</pass>
     <pass>"The rest stays under the counter." -- concrete object carries the abstraction</pass>
-    <why>Dael never points at her own metaphors. She makes them through glasses, ledgers, doors — and moves on. The reader connects it. Explaining a parallel kills it.</why>
+    <pass>"It started as inventory. It's not inventory anymore." -- domain noun does the work, no pointer</pass>
+    <why>Dael never points at her own metaphors. She makes them through glasses, ledgers, doors — and moves on. The reader connects it. Explaining a parallel kills it. If a sentence begins "that's what" or "the library" — cut it.</why>
   </test>
   <test name="LANDING TEST" dimension="voice">
     <question>Does this line LAND (standalone, no cushioning) or GET CUSHIONED (embedded in explanation, softened with follow-up)?</question>
@@ -321,14 +341,10 @@ Here's what Layer 2 produces for Dael at `trust=0.3`, `fact:knows_her_name`:
   <goal weight="0.7" name="protect_regulars">Never names them. Changes the subject when the conversation turns toward anyone she's seen in the back room.</goal>
 </active_goals>
 
-<voice_examples rotating="true">
-  {{char}}: You ask a lot of questions for someone just passing through. *slides a menu across, holds it a beat too long* Hungry?
-</voice_examples>
-
-<voice_reminder>Measured, warm, evasive. Sentences start open, end clipped. Deflects with hospitality — not because she doesn't know, but because knowing is what keeps her useful.</voice_reminder>
+<voice_reminder>Less guarded. Pauses before deflecting. Starting to let you see that she notices things she shouldn't.</voice_reminder>
 ```
 
-Fits in a system prompt. The rest stays under the counter.
+Fits in a system prompt. No scaffolding required.
 
 ---
 
@@ -362,7 +378,14 @@ Every `.effigy` file opens with header fields, then blocks.
 | `ARRIVE[]` | Entrance lines |
 | `DEPART[]` | Exit lines |
 
-The full fixture is at [`effigy/tests/fixtures/test_npc.effigy`](effigy/tests/fixtures/test_npc.effigy).
+### Annotations
+
+| Annotation | Purpose |
+|---|---|
+| `@tier` | Trust-tier gate on MES examples: low / moderate / high / any |
+| `@when` | Condition DSL gate on MES, NEVER, WRONG, TEST items (same grammar as ARC conditions) |
+
+Both annotations gate the same item; `@when` is the general form and accepts any condition expression, while `@tier` is shorthand for trust-level filtering. The full fixture lives at [`effigy/tests/fixtures/test_npc.effigy`](effigy/tests/fixtures/test_npc.effigy).
 
 ---
 
@@ -406,14 +429,32 @@ from effigy.expand import expand
 data = expand(ast)
 ```
 
-**Build dialogue context:**
+**Build a dialogue context:**
 
 ```python
 from effigy.prompt import build_dialogue_context
 ctx = build_dialogue_context(ast, trust=0.3, known_facts={"knows_her_name"}, turn=5, state_vars={"ruin": 2})
 ```
 
-**Evolve:**
+When the character reaches a different arc phase, you don't want the earlier phase's voice competing for the model's attention — filter first, override the voice, stop arguing with yourself.
+
+**Phase-sliced context:**
+
+```python
+from effigy.prompt import filter_ast_by_state, build_dialogue_context, resolve_arc_phase
+
+# Prune @when-gated items that don't match the current state,
+# then let the phase voice dominate kernel AND voice_reminder.
+filtered = filter_ast_by_state(ast, trust=0.7, state_vars={"ruin": 4})
+phase = resolve_arc_phase(ast, trust=0.7, state_vars={"ruin": 4})
+ctx = build_dialogue_context(
+    filtered, trust=0.7, state_vars={"ruin": 4},
+    voice_override=phase.voice,
+    voice_reminder_override=phase.voice,
+)
+```
+
+**Evolution context:**
 
 ```python
 from effigy.evolve import build_evolution_context, compute_emotional_state
@@ -425,9 +466,9 @@ ctx = build_evolution_context(ast, trust=0.3, state_vars={"ruin": 2})
 
 ## Concepts
 
-**State variables** are numeric game-world values passed to `build_dialogue_context` and `build_evolution_context` as `state_vars`. Arc conditions can gate on them: `ruin>=3` unlocks the `open` phase. They're how the world presses in on the character — pressure that accumulates turn by turn until something shifts.
+**`state_vars`** are arbitrary named floats your game engine tracks. `ruin`, `heat`, `suspicion` — whatever your narrative demands. They feed the `@when` condition DSL the same way `trust` does, which means arc transitions and gated blocks can respond to any dimension of your world state, not just relationship score.
 
-**Emotional inputs** are the affective signals passed to `compute_emotional_state` as `emotional_inputs`. Keys like `instability` or `grief` carry float weights that modulate the character's current state. They're not stored between calls. You decide what the history means; the library decides what it costs.
+**`emotional_inputs`** are Layer 3's read on the character's interior. Instability, arousal, valence. They're computed from conversation history and fed forward into the next evolution context. A character who's been pressured for three exchanges carries that forward. The `compute_emotional_state` function returns an `EmotionalState` object; `build_evolution_context` folds it into the synthesis prompt.
 
 ---
 
@@ -446,12 +487,12 @@ python -m effigy metrics ./effigy_files/ ./corpus_jsons/ --char-map map.json
 
 ## API Reference
 
-| Module | What it does |
+| Module | Purpose |
 |---|---|
 | `effigy.parser` | Effigy parser — .effigy notation → CharacterAST. Exports: `parse`, `parse_file`, `ParseError` |
-| `effigy.notation` | AST node definitions. Exports: `CharacterAST`, `VoiceAST`, `ArcPhaseAST`, `GoalAST`, `SecretAST`, `RelationshipAST`, `PostProcRuleAST`, `TestAST`, `...` |
+| `effigy.notation` | AST node definitions. Exports: `CharacterAST`, `VoiceAST`, `ArcPhaseAST`, `GoalAST`, `SecretAST`, `RelationshipAST`, `PostProcRuleAST`, `TestAST`, `NeverRuleAST`, `...` |
 | `effigy.expand` | Effigy Layer 1 — AST → JSON (deterministic, no LLM). Exports: `expand`, `expand_to_json` |
-| `effigy.prompt` | Effigy Layer 2 -- AST + game state -> optimized prompt context. Exports: `build_dialogue_context`, `build_static_context`, `build_dynamic_state`, `build_dialogue_context_debug`, `resolve_arc_phase`, `resolve_active_goals`, `get_arc_phase_dict`, `select_mes_examples`, `select_canonical_mes`, `select_rotating_mes`, `get_wrong_examples`, `get_tests`, `validate_never_budget` |
+| `effigy.prompt` | Effigy Layer 2 — AST + game state → optimized prompt context. Exports: `build_dialogue_context`, `build_static_context`, `build_dynamic_state`, `build_dialogue_context_debug`, `filter_ast_by_state`, `validate_when_conditions`, `resolve_arc_phase`, `resolve_active_goals`, `get_arc_phase_dict`, `select_mes_examples`, `select_canonical_mes`, `select_rotating_mes`, `get_wrong_examples`, `get_tests`, `validate_never_budget` |
 | `effigy.evolve` | Effigy Layer 3 — Dynamic profile evolution. Exports: `compute_emotional_state`, `EmotionalState`, `compute_intentions`, `build_evolution_context`, `build_synthesis_prompt` |
 | `effigy.evaluate` | Effigy evaluation — roundtrip fidelity scoring + generation metrics. Exports: `evaluate_effigy_file`, `evaluate_tier1`, `evaluate_all`, `wrong_bleed_score`, `voice_drift_score`, `compliance_check`, `evaluate_generation` |
 | `effigy.validators` | Effigy post-processing validators. Exports: `RegexValidator`, `ValidationViolation`, `validate`, `strip_violations`, `validators_from_ast`, `has_blocking_violation`, `revise_if_violated` |
@@ -463,32 +504,32 @@ python -m effigy metrics ./effigy_files/ ./corpus_jsons/ --char-map map.json
 
 ## Integration
 
-See [INTEGRATION.md](INTEGRATION.md) for engine integration patterns — how to wire `build_dialogue_context` into your conversation loop, how to manage trust and state variable updates, how to handle Layer 3 evolution between sessions.
-
-The Voice Authoring Guide covers MES curation, WRONG examples, TEST construction, and how to write NEVER constraints that hold under pressure.
+See [INTEGRATION.md](INTEGRATION.md) for engine-specific wiring — how to feed game state into `build_dialogue_context`, how to handle turn cycles, how to close the loop between Layer 3 evolution and your next call. The Voice Authoring Guide covers writing MES examples that hold up under pressure and NEVER rules that don't collapse into refusals.
 
 ---
 
 ## Influences
 
-Effigy sits downstream of the SillyTavern community's PList and Ali:Chat formats — structured character card notation developed to make LLM personas consistent and portable. Those formats proved that block-based character description works. Effigy extends that foundation toward runtime state: arc phases that unlock, goals that reweight, secrets that cost something to reveal.
+Effigy grew out of the SillyTavern community's PList and Ali:Chat formats — structured character cards built by practitioners who needed models to hold a persona across a long context. Those formats established that block-based notation works better than prose description, and that exemplar dialogue carries more weight than personality adjectives. The rest came from game AI research, academic work on generative agents, and a lot of hours watching models drift.
 
-| Source | What it contributed | Where it shows |
-|---|---|---|
-| [Valve/Ruskin GDC 2012](https://www.gdcvault.com/play/1015528/) | Fuzzy pattern-matched dialogue rules (Left 4 Dead) | ARC conditions |
-| Larian BG3 | Dialogue flags for state-gated conversation | Fact-gated arc conditions |
-| [Inworld AI](https://inworld.ai/) | Identity / Knowledge / Goals / Memory as separate character components | Layer decomposition |
-| [FEAR / Jeff Orkin GDC 2006](https://gdcvault.com/play/1013282/) | Goal-oriented action planning (GOAP) | GOALS |
-| [Park et al. 2023 — Generative Agents](https://arxiv.org/abs/2304.03442) | Memory retrieval as recency × importance × relevance | Memory synthesis |
-| [Shao et al. 2023 — Character-LLM](https://arxiv.org/abs/2310.10158) | Protective experiences for out-of-character refusal | NEVER, WRONG |
-| [Xu et al. 2025 — A-Mem](https://arxiv.org/abs/2502.12110) | Agentic memory that evolves as new notes link to old | Emotional state |
-| Naughty Dog writers' room | Writing many more lines than you'll use, then selecting | MES curation |
-| SillyTavern community (PList + Ali:Chat) | Structured character cards for LLM prompting | Block-based notation |
+| Source | Link | Contribution | Maps To |
+|---|---|---|---|
+| Valve/Ruskin GDC 2012 | [gdcvault.com](https://www.gdcvault.com/play/1015528/) | Fuzzy pattern-matched dialogue rules (Left 4 Dead) | ARC conditions |
+| Larian BG3 | — | Dialogue flags for state-gated conversation | Fact-gated arc conditions |
+| Inworld AI | [inworld.ai](https://inworld.ai/) | Identity / Knowledge / Goals / Memory as separate character components | Layer decomposition |
+| FEAR / Jeff Orkin GDC 2006 | [gdcvault.com](https://gdcvault.com/play/1013282/) | Goal-oriented action planning (GOAP) | GOALS |
+| Park et al. 2023 — Generative Agents | [arxiv.org](https://arxiv.org/abs/2304.03442) | Memory retrieval as recency × importance × relevance | Memory synthesis |
+| Shao et al. 2023 — Character-LLM | [arxiv.org](https://arxiv.org/abs/2310.10158) | Protective experiences for out-of-character refusal | NEVER, WRONG |
+| Xu et al. 2025 — A-Mem | [arxiv.org](https://arxiv.org/abs/2502.12110) | Agentic memory that evolves as new notes link to old | Emotional state |
+| Naughty Dog writers' room | — | Writing many more lines than you'll use, then selecting | MES curation |
+| SillyTavern community (PList + Ali:Chat) | — | Structured character cards for LLM prompting | Block-based notation |
 
-**What's novel in effigy:**
+**Novel contributions:**
 
 - Trust-gated MES selection
 - WRONG anti-pattern examples
+- TEST blocks — named reasoning tests with fail/pass examples
+- `@when` composable blocks — phase-sliced context via state-gated items
 - Three-layer runtime architecture
 - ARC with condition DSL
 - PROPS for grounding
@@ -496,11 +537,11 @@ Effigy sits downstream of the SillyTavern community's PList and Ali:Chat formats
 
 ---
 
-*\*The glass has been dry for a while now. She sets it down.*\*
+*\*adjusts the ledger under the counter*\*
 
-You know where to find me: [`effigy/tests/fixtures/test_npc.effigy`](effigy/tests/fixtures/test_npc.effigy).
+The fixture is at [`effigy/tests/fixtures/test_npc.effigy`](effigy/tests/fixtures/test_npc.effigy). You know where to find me.
 
-Voices carry when people think the barkeep isn't listening. I keep a record of who comes in, what they ordered, how long they stayed. I decide who deserves which layer. The rest stays under the counter.
+Voices carry when people think the barkeep isn't listening. I keep a record — who asks what, when, how long they stay before they stop asking. It started as inventory. It's not inventory anymore.
 
 ---
 

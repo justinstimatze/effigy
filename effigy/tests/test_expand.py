@@ -203,6 +203,32 @@ TEST[
         assert "tests" not in result
 
 
+class TestExpandNeverWithWhen:
+    def test_plain_strings_when_no_gate(self):
+        """No @when anywhere → plain strings for backward compat."""
+        ast = parse("@id x\nNEVER[\nNever A\n---\nNever B\n]\n")
+        result = expand(ast)
+        assert result["never_would_say"] == ["Never A", "Never B"]
+
+    def test_uniform_dicts_when_any_gate_present(self):
+        """Any @when gate → every rule serialized as {'text', 'when'} dict."""
+        text = """
+@id x
+NEVER[
+Never A
+---
+@when trust>=0.6
+Never B at high trust
+]
+"""
+        ast = parse(text)
+        result = expand(ast)
+        assert result["never_would_say"] == [
+            {"text": "Never A", "when": ""},
+            {"text": "Never B at high trust", "when": "trust>=0.6"},
+        ]
+
+
 # These are integration tests that skip when corpus files are not available.
 _EFFIGY_DIRS = [
     Path(__file__).parent / "fixtures",
