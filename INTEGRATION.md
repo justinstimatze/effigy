@@ -395,6 +395,83 @@ Flags:
 | `select_next_beat(covered)` with hardcoded order | `next_beat(phase, covered)` |
 | Custom `_build_compiled_system` / `_build_compiled_prompt` | `build_dialogue_context(voice_override=...)` — caller wraps for ground truth / conversation state |
 
+### Prompt caching with beats
+
+Anthropic's prompt cache keys on byte-stable prefixes. Beat filtering
+changes what `select_canonical_mes` returns, so where beat-tagged items
+sit in the authored MES order determines how much of the static context
+survives a beat rotation.
+
+`select_canonical_mes` takes `ast.mes_examples[:CANONICAL_MES_COUNT]`
+(the first two items, by default) and renders them inside
+`<voice_examples canonical>`. Three authoring patterns produce three
+cache regimes:
+
+**Universals first (recommended):**
+
+```
+MES[
+{{char}}: Universal opener — shown at every beat.
+---
+{{char}}: Another universal.
+---
+@beat KNOWING
+{{char}}: knowing-specific.
+]
+```
+
+Canonical is `[universal_1, universal_2]` regardless of which beat the
+caller asked for. **Static context is byte-identical across beat
+rotations — 100% prompt-cache hit on the static prefix.** This is the
+fixture's pattern and what `validate_beat_references` considers clean.
+
+**All beat-tagged, no universals (accepted):**
+
+```
+MES[
+@beat KNOWING
+{{char}}: knowing-specific.
+---
+@beat CHOICE
+{{char}}: choice-specific.
+]
+```
+
+Every line is situation-specific; no universal opener exists. Canonical
+becomes beat-specific and the static context differs per beat. **Cache
+boundary becomes `(char_id, phase, beat)` instead of `(char_id)`.**
+Within a beat, all turns cache-hit; a beat rotation invalidates the
+canonical block and everything after it. Validator does not flag this —
+it's a legitimate shape when every line genuinely belongs to its beat.
+Measured with a minimal fixture: ~50% of the static context
+re-processes per beat rotation.
+
+**Universals exist but not first (bug — validator warns):**
+
+```
+MES[
+@beat KNOWING
+{{char}}: knowing-specific.
+---
+{{char}}: Universal — authored too late.
+]
+```
+
+The universal can't reach the canonical slot; beat-tagged items take it
+instead. You pay the "no universals" cache cost despite having authored
+universals. `validate_beat_references` emits:
+
+```
+WARN: first 2 MES item(s) include @beat-tagged entries but un-tagged
+universal entries exist later in the list. Canonical slice drifts per
+beat and prompt-cache hit rate degrades across beat rotations. Move
+universal (@beat-free) entries to the top of MES.
+```
+
+Wire `validate_beat_references` into your pre-commit script (alongside
+`validate_when_conditions` and `validate_never_budget`) so the warn
+surfaces at authoring time rather than as a billing line item.
+
 ## 3. Narrator System Prompt
 
 **This is the critical step most integrations miss.** The LLM receives effigy

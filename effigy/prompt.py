@@ -733,6 +733,28 @@ def validate_beat_references(ast: CharacterAST) -> list[str]:
                     f"below {MIN_EXEMPLARS_PER_BEAT_WARN}"
                 )
 
+    # --- (4) cache-stability: canonical slot should hold universals ---
+    # select_canonical_mes takes ast.mes_examples[:CANONICAL_MES_COUNT] as
+    # the "cache-stable" voice_examples. If any of those items carry @beat,
+    # the canonical block drifts per beat, which invalidates Anthropic's
+    # prompt cache on the static prefix at every beat rotation. If the
+    # author HAS universal (@beat-free) items but placed them later in the
+    # list, that's a pure ordering bug — move them to the top. Characters
+    # with no universals at all are a different, accepted case (cache
+    # boundary becomes per-beat) and don't warrant a warning here.
+    head = ast.mes_examples[:CANONICAL_MES_COUNT]
+    tail = ast.mes_examples[CANONICAL_MES_COUNT:]
+    head_has_beat = any(getattr(ex, "beat", "") for ex in head)
+    tail_has_universal = any(not getattr(ex, "beat", "") for ex in tail)
+    if head_has_beat and tail_has_universal:
+        errors.append(
+            f"WARN: first {CANONICAL_MES_COUNT} MES item(s) include "
+            f"@beat-tagged entries but un-tagged universal entries exist "
+            f"later in the list. Canonical slice drifts per beat and "
+            f"prompt-cache hit rate degrades across beat rotations. Move "
+            f"universal (@beat-free) entries to the top of MES."
+        )
+
     return errors
 
 

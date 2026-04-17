@@ -1,6 +1,6 @@
 [project]
 name = "effigy"
-version = "0.6.2"
+version = "0.6.3"
 description = "Dense character notation for LLM-driven NPCs — compact behavioral dossiers with trust-gated content, arc phases, and emotional evolution"
 requires-python = ">=3.13"
 dependencies = []

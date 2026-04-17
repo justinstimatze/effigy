@@ -1718,6 +1718,100 @@ MES[
         assert validate_beat_references(ast) == []
 
 
+class TestCanonicalCacheOrdering:
+    """v0.6.3: validator warns when beat-tagged items hold the canonical slot."""
+
+    def test_universals_first_is_clean(self):
+        from effigy.prompt import validate_beat_references
+
+        text = """@id x
+ARC{
+  p → trust>=0.0
+    voice: "v."
+    beats: A -> B
+}
+MES[
+{{char}}: universal_1.
+---
+{{char}}: universal_2.
+---
+@beat A
+{{char}}: a_1.
+---
+@beat A
+{{char}}: a_2.
+---
+@beat B
+{{char}}: b_1.
+---
+@beat B
+{{char}}: b_2.
+]
+"""
+        ast = parse(text)
+        errs = validate_beat_references(ast)
+        assert not any("Canonical slice drifts" in e for e in errs)
+
+    def test_beats_first_with_universals_later_warns(self):
+        from effigy.prompt import validate_beat_references
+
+        text = """@id x
+ARC{
+  p → trust>=0.0
+    voice: "v."
+    beats: A -> B
+}
+MES[
+@beat A
+{{char}}: a_first.
+---
+@beat B
+{{char}}: b_first.
+---
+{{char}}: misplaced_universal.
+---
+@beat A
+{{char}}: a_second.
+---
+@beat B
+{{char}}: b_second.
+]
+"""
+        ast = parse(text)
+        errs = validate_beat_references(ast)
+        cache_warns = [e for e in errs if "Canonical slice drifts" in e]
+        assert len(cache_warns) == 1
+        assert cache_warns[0].startswith("WARN")
+
+    def test_no_universals_at_all_is_not_flagged(self):
+        """Characters whose every line is beat-specific are accepted."""
+        from effigy.prompt import validate_beat_references
+
+        text = """@id x
+ARC{
+  p → trust>=0.0
+    voice: "v."
+    beats: A -> B
+}
+MES[
+@beat A
+{{char}}: a_1.
+---
+@beat A
+{{char}}: a_2.
+---
+@beat B
+{{char}}: b_1.
+---
+@beat B
+{{char}}: b_2.
+]
+"""
+        ast = parse(text)
+        errs = validate_beat_references(ast)
+        assert not any("Canonical slice drifts" in e for e in errs)
+
+
 class TestBeatFilterFalsy:
     """v0.6.1: beat='' is a no-op, same as beat=None."""
 
@@ -1819,7 +1913,7 @@ class TestVersionString:
     def test_version_matches_release(self):
         import effigy
 
-        assert effigy.__version__ == "0.6.2"
+        assert effigy.__version__ == "0.6.3"
 
     def test_pyproject_version_matches_init(self):
         """Catch the v0.6.0/v0.6.1 footgun where pyproject lagged behind."""
