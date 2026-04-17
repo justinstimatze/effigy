@@ -491,6 +491,7 @@ def filter_ast_by_state(
     *,
     state_vars: dict[str, float] | None = None,
     known_facts: set[str] | None = None,
+    beat: str | None = None,
 ) -> CharacterAST:
     """Return a new CharacterAST with ``@when``-gated items pruned by state.
 
@@ -511,6 +512,12 @@ def filter_ast_by_state(
     native ``_parse_conditions`` grammar (same syntax as ARC phase gates).
     Unparseable conditions are treated as unmet (item dropped).
 
+    When ``beat`` is provided (v0.6.0), also drops items whose ``@beat``
+    label is set AND doesn't match ``beat``. Items with no ``@beat`` are
+    treated as universal and retained at every beat. NEVER rules have no
+    ``beat`` attribute, so beat filtering never removes them — they're
+    constraints, not exemplars.
+
     This function does not mutate ``ast``. Items not subject to
     ``@when`` filtering are shared by reference with the input AST.
     """
@@ -520,7 +527,13 @@ def filter_ast_by_state(
 
     def keep(item) -> bool:
         when = getattr(item, "when", "")
-        return not when or _when_matches(when, trust, state_vars, known_facts, char_id)
+        if when and not _when_matches(when, trust, state_vars, known_facts, char_id):
+            return False
+        if beat is not None:
+            item_beat = getattr(item, "beat", "")
+            if item_beat and item_beat != beat:
+                return False
+        return True
 
     return dataclasses.replace(
         ast,
@@ -529,6 +542,37 @@ def filter_ast_by_state(
         wrong_examples=[w for w in ast.wrong_examples if keep(w)],
         tests=[t for t in ast.tests if keep(t)],
     )
+
+
+def next_beat(
+    phase: ArcPhaseAST | None,
+    covered: set[str] | None = None,
+) -> str | None:
+    """Return the next beat to target in a phase's authored progression.
+
+    Returns ``None`` when ``phase`` is ``None`` or the phase has no
+    ``beats:`` list. This gives callers a clean gate:
+
+        beat = next_beat(phase, covered)
+        if beat:
+            filtered = filter_ast_by_state(ast, ..., beat=beat)
+            # compiled single-beat path
+        else:
+            filtered = filter_ast_by_state(ast, ...)
+            # kitchen-sink path
+
+    When a phase has beats, returns the first beat in authored order that
+    isn't yet in ``covered``. If all beats are covered, cycles back to
+    ``phase.beats[0]`` so the caller can decide when to reset ``covered``
+    rather than being told "you're done."
+    """
+    if phase is None or not phase.beats:
+        return None
+    covered = covered or set()
+    for b in phase.beats:
+        if b not in covered:
+            return b
+    return phase.beats[0]
 
 
 def validate_when_conditions(ast: CharacterAST) -> list[str]:
@@ -585,6 +629,87 @@ def validate_when_conditions(ast: CharacterAST) -> list[str]:
             errors.append(
                 f"{label}: {when!r}: unrecognized parts {conds['raw']!r}"
             )
+    return errors
+
+
+# Minimum exemplar count per declared beat before validator flags it.
+# Below MIN_EXEMPLARS_PER_BEAT_ERROR: hard error (not enough variety).
+# Below MIN_EXEMPLARS_PER_BEAT_WARN: warning (generation quality degrades).
+MIN_EXEMPLARS_PER_BEAT_ERROR = 2
+MIN_EXEMPLARS_PER_BEAT_WARN = 3
+
+
+def validate_beat_references(ast: CharacterAST) -> list[str]:
+    """Cross-check ``@beat`` annotations against phase ``beats:`` lists.
+
+    Returns a list of error/warning strings. Empty means the beat layout
+    is clean. Intended for pre-commit hooks, same style as
+    ``validate_when_conditions`` and ``validate_never_budget``.
+
+    Checks (in order):
+
+    1. Every ``@beat NAME`` on MES/WRONG/TEST appears in some phase's
+       ``beats:`` list. Catches typos like ``@beat COS`` when the phase
+       declares ``COST``. Prefix: ``ERROR``.
+    2. Every name in a phase's ``beats:`` list has at least
+       ``MIN_EXEMPLARS_PER_BEAT_ERROR`` MES examples tagged with it.
+       Prefix: ``ERROR``. Below this the beat path produces degenerate
+       output.
+    3. Beats that pass (1) and (2) but have fewer than
+       ``MIN_EXEMPLARS_PER_BEAT_WARN`` MES examples get a ``WARN``.
+       Generation quality drops noticeably below 3 exemplars per beat.
+
+    WRONG and TEST beats are validated against the same name set but
+    don't count toward the exemplar budget — only MES entries do (those
+    are what the LLM generates from).
+    """
+    errors: list[str] = []
+
+    declared_beats: set[str] = set()
+    beats_by_phase: dict[str, list[str]] = {}
+    for phase in ast.arc_phases:
+        if phase.beats:
+            beats_by_phase[phase.name] = list(phase.beats)
+            declared_beats.update(phase.beats)
+
+    # --- (1) unknown @beat references ---
+    def _check_known(label: str, beat_val: str) -> None:
+        if beat_val and beat_val not in declared_beats:
+            errors.append(
+                f"ERROR {label}: @beat {beat_val!r} not declared in any "
+                f"phase's beats: list (known: {sorted(declared_beats) or 'none'})"
+            )
+
+    for i, ex in enumerate(ast.mes_examples):
+        _check_known(f"MES[{i}]", getattr(ex, "beat", ""))
+    for i, we in enumerate(ast.wrong_examples):
+        _check_known(f"WRONG[{i}]", getattr(we, "beat", ""))
+    for i, t in enumerate(ast.tests):
+        _check_known(f"TEST[{i}]", getattr(t, "beat", ""))
+
+    # --- (2, 3) exemplar counts per declared beat ---
+    mes_counts: dict[str, int] = {}
+    for ex in ast.mes_examples:
+        b = getattr(ex, "beat", "")
+        if b:
+            mes_counts[b] = mes_counts.get(b, 0) + 1
+
+    for phase_name, beats in beats_by_phase.items():
+        for beat_name in beats:
+            count = mes_counts.get(beat_name, 0)
+            if count < MIN_EXEMPLARS_PER_BEAT_ERROR:
+                errors.append(
+                    f"ERROR phase {phase_name!r} beat {beat_name!r}: "
+                    f"{count} MES exemplar(s), need at least "
+                    f"{MIN_EXEMPLARS_PER_BEAT_ERROR}"
+                )
+            elif count < MIN_EXEMPLARS_PER_BEAT_WARN:
+                errors.append(
+                    f"WARN phase {phase_name!r} beat {beat_name!r}: "
+                    f"only {count} MES exemplar(s), quality degrades "
+                    f"below {MIN_EXEMPLARS_PER_BEAT_WARN}"
+                )
+
     return errors
 
 
@@ -1056,6 +1181,8 @@ def get_wrong_examples(ast: CharacterAST) -> list[dict[str, str]]:
             entry["right"] = we.right
         if we.why:
             entry["why"] = we.why
+        if we.beat:
+            entry["beat"] = we.beat
         results.append(entry)
     return results
 
@@ -1073,6 +1200,8 @@ def get_tests(ast: CharacterAST) -> list[dict[str, Any]]:
             entry["pass_examples"] = list(t.pass_examples)
         if t.why:
             entry["why"] = t.why
+        if t.beat:
+            entry["beat"] = t.beat
         results.append(entry)
     return results
 

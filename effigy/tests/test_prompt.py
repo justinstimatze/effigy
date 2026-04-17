@@ -1483,3 +1483,269 @@ MES[
         errors = validate_when_conditions(ast)
         assert errors, "expected at least one error for unparseable condition"
         assert any("MES" in err for err in errors)
+
+
+# ---------------------------------------------------------------------------
+# v0.6.0: @beat + beats: + next_beat + validate_beat_references
+# ---------------------------------------------------------------------------
+
+
+BEAT_NOTATION = """
+@id betty_test
+
+VOICE{
+  kernel: Plain, self-implicating.
+}
+
+ARC{
+  guarded → trust>=0.0
+    voice: "Polite distance."
+  resolved → trust>=0.6 AND ruin>=4
+    voice: "Self-implicating, staccato."
+    beats: KNOWING -> CHOICE -> COST -> BILL -> WHAT_NOW
+}
+
+MES[
+{{char}}: Universal line (no beat).
+---
+{{char}}: Another universal.
+---
+@beat KNOWING
+{{char}}: *still* I knew. Not the details. Not what you found.
+---
+@beat KNOWING
+{{char}}: *flat hand* I chose not to ask what of.
+---
+@beat KNOWING
+{{char}}: *not moving* I think I always knew.
+---
+@beat CHOICE
+{{char}}: *still* I put the box in storage and left it there.
+---
+@beat CHOICE
+{{char}}: *not moving* That was a choice.
+---
+@beat CHOICE
+{{char}}: *still* Sixty years of not opening it.
+---
+@beat COST
+{{char}}: *still* I served Tom breakfast every morning.
+---
+@beat COST
+{{char}}: *not moving* I poured their coffee.
+---
+@beat BILL
+{{char}}: *still* He was a shift foreman. Didn't come home.
+---
+@beat WHAT_NOW
+{{char}}: *still* I open it. Today.
+]
+"""
+
+
+class TestBeatFiltering:
+    def test_beat_param_filters_mes(self):
+        from effigy.prompt import filter_ast_by_state
+
+        ast = parse(BEAT_NOTATION)
+        filtered = filter_ast_by_state(
+            ast, trust=0.7, state_vars={"ruin": 5}, beat="COST"
+        )
+        beats = [getattr(e, "beat", "") for e in filtered.mes_examples]
+        # Universals (beat="") kept; only COST kept among tagged items.
+        assert "KNOWING" not in beats
+        assert "CHOICE" not in beats
+        assert "BILL" not in beats
+        assert "WHAT_NOW" not in beats
+        assert beats.count("COST") == 2
+        assert beats.count("") == 2  # two universals
+
+    def test_beat_none_is_noop(self):
+        """beat=None leaves beat-tagged items alone (kitchen-sink mode)."""
+        from effigy.prompt import filter_ast_by_state
+
+        ast = parse(BEAT_NOTATION)
+        filtered = filter_ast_by_state(
+            ast, trust=0.7, state_vars={"ruin": 5}, beat=None
+        )
+        assert len(filtered.mes_examples) == len(ast.mes_examples)
+
+    def test_beat_composes_with_when(self):
+        """@when still applies with beat set."""
+        from effigy.prompt import filter_ast_by_state
+
+        ast = parse(BEAT_NOTATION)
+        # low trust + COST beat: @when trust>=X items drop; COST items have
+        # no @when so stay; universals stay
+        filtered = filter_ast_by_state(ast, trust=0.0, beat="COST")
+        beats = [getattr(e, "beat", "") for e in filtered.mes_examples]
+        assert beats.count("COST") == 2
+        assert beats.count("") == 2
+
+    def test_never_rules_untouched_by_beat(self):
+        """NEVER has no beat attribute, so beat filter must not drop them."""
+        from effigy.prompt import filter_ast_by_state
+
+        ast = parse("""@id x
+NEVER[
+Always on rule
+---
+@when trust>=0.6
+High trust rule
+]
+""")
+        filtered = filter_ast_by_state(ast, trust=0.7, beat="COST")
+        assert len(filtered.never_would_say) == 2
+
+
+class TestNextBeat:
+    def test_none_when_phase_has_no_beats(self):
+        from effigy.prompt import next_beat, resolve_arc_phase
+
+        ast = parse(BEAT_NOTATION)
+        phase = resolve_arc_phase(ast, trust=0.0)
+        assert phase.name == "guarded"
+        assert next_beat(phase, set()) is None
+
+    def test_none_when_phase_is_none(self):
+        from effigy.prompt import next_beat
+
+        assert next_beat(None, set()) is None
+
+    def test_returns_first_uncovered_in_order(self):
+        from effigy.prompt import next_beat, resolve_arc_phase
+
+        ast = parse(BEAT_NOTATION)
+        phase = resolve_arc_phase(ast, trust=0.7, state_vars={"ruin": 5})
+        assert phase.name == "resolved"
+        assert next_beat(phase, set()) == "KNOWING"
+        assert next_beat(phase, {"KNOWING"}) == "CHOICE"
+        assert next_beat(phase, {"KNOWING", "CHOICE"}) == "COST"
+
+    def test_cycles_back_when_all_covered(self):
+        from effigy.prompt import next_beat, resolve_arc_phase
+
+        ast = parse(BEAT_NOTATION)
+        phase = resolve_arc_phase(ast, trust=0.7, state_vars={"ruin": 5})
+        all_beats = set(phase.beats)
+        # When everything's covered, cycle back to first (caller decides
+        # when to reset the covered set).
+        assert next_beat(phase, all_beats) == "KNOWING"
+
+    def test_covered_defaults_to_empty(self):
+        from effigy.prompt import next_beat, resolve_arc_phase
+
+        ast = parse(BEAT_NOTATION)
+        phase = resolve_arc_phase(ast, trust=0.7, state_vars={"ruin": 5})
+        assert next_beat(phase) == "KNOWING"
+
+
+class TestValidateBeatReferences:
+    def test_clean_notation_returns_empty(self):
+        from effigy.prompt import validate_beat_references
+
+        ast = parse(BEAT_NOTATION)
+        # BEAT_NOTATION has no WHAT_NOW/BILL under-population; BILL has 1
+        # exemplar, WHAT_NOW has 1 — both below the error threshold of 2.
+        errors = validate_beat_references(ast)
+        error_messages = "\n".join(errors)
+        # Both BILL (1 MES) and WHAT_NOW (1 MES) fall below the error bar.
+        assert "BILL" in error_messages
+        assert "WHAT_NOW" in error_messages
+        # KNOWING has 3, CHOICE has 3, COST has 2 — above the warn bar or
+        # at the warn edge. COST at exactly 2 triggers WARN (below 3 is warn).
+        assert any("COST" in e and "WARN" in e for e in errors)
+
+    def test_unknown_beat_name_flagged(self):
+        from effigy.prompt import validate_beat_references
+
+        text = """@id x
+
+ARC{
+  resolved → trust>=0.0
+    voice: "Plain."
+    beats: KNOWING -> COST
+}
+
+MES[
+@beat COST
+{{char}}: valid.
+---
+@beat COST
+{{char}}: also valid.
+---
+@beat KNOWING
+{{char}}: a.
+---
+@beat KNOWING
+{{char}}: b.
+---
+@beat TYPO
+{{char}}: invalid beat name.
+]
+"""
+        ast = parse(text)
+        errors = validate_beat_references(ast)
+        assert any("TYPO" in e and "ERROR" in e for e in errors)
+
+    def test_under_populated_beat_errors(self):
+        from effigy.prompt import validate_beat_references
+
+        text = """@id x
+
+ARC{
+  resolved → trust>=0.0
+    voice: "Plain."
+    beats: A -> B
+}
+
+MES[
+@beat A
+{{char}}: only one A.
+]
+"""
+        ast = parse(text)
+        errors = validate_beat_references(ast)
+        # A has 1 exemplar → ERROR. B has 0 → ERROR.
+        assert any("A" in e and "ERROR" in e for e in errors)
+        assert any("'B'" in e and "ERROR" in e for e in errors)
+
+    def test_ast_without_beats_declarations_returns_empty(self):
+        """Characters that never declare beats: shouldn't fail validation."""
+        from effigy.prompt import validate_beat_references
+
+        ast = parse("@id x\nMES[\n{{char}}: just text.\n]\n")
+        assert validate_beat_references(ast) == []
+
+
+class TestBeatOnWrongAndTestAccessors:
+    def test_get_wrong_examples_includes_beat(self):
+        from effigy.prompt import get_wrong_examples
+
+        text = """@id x
+WRONG[
+@beat COST
+{{user}}: q
+WRONG: "w"
+RIGHT: "r"
+WHY: reason
+]
+"""
+        ast = parse(text)
+        results = get_wrong_examples(ast)
+        assert results[0]["beat"] == "COST"
+
+    def test_get_tests_includes_beat(self):
+        from effigy.prompt import get_tests
+
+        text = """@id x
+TEST[
+@beat COST
+  name: T
+  question: q?
+  fail: bad
+  pass: good
+]
+"""
+        ast = parse(text)
+        assert get_tests(ast)[0]["beat"] == "COST"

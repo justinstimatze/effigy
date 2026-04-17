@@ -18,6 +18,7 @@ from effigy.parser import parse
 from effigy.prompt import (
     build_dialogue_context,
     filter_ast_by_state,
+    next_beat,
     resolve_arc_phase,
 )
 
@@ -85,6 +86,54 @@ def _extract_facts(ast, raw_text: str) -> dict:
     # section — it's the "middle" state a reader can calibrate against.
     ctx = phase_contexts["thawing"]
 
+    # Beat-sliced contexts (v0.6.0). For each phase that declares beats:,
+    # compile a per-beat context — same kitchen-sink path as above, but
+    # with an extra beat= filter. The README shows ONE of these alongside
+    # the kitchen-sink version so the visual shrinkage is legible.
+    beat_contexts: dict[str, dict[str, str]] = {}
+    beat_metrics: dict[str, dict[str, int]] = {}
+    for phase in ast.arc_phases:
+        if not phase.beats:
+            continue
+        # Resolve a state that activates this phase. Find it by looking up
+        # the phase_states tuple whose name matches.
+        trust_sv_facts = next(
+            ((t, f, s) for n, t, f, s in phase_states if n == phase.name),
+            None,
+        )
+        if trust_sv_facts is None:
+            continue
+        trust, facts_set, sv = trust_sv_facts
+        # Baseline kitchen-sink (for contrast in the README)
+        kitchen = filter_ast_by_state(
+            ast, trust, state_vars=sv, known_facts=facts_set
+        )
+        beat_metrics[phase.name] = {
+            "kitchen_sink_mes": len(kitchen.mes_examples),
+            "kitchen_sink_chars": len(phase_contexts[phase.name]),
+            "beats": len(phase.beats),
+        }
+        per_beat: dict[str, str] = {}
+        for b in phase.beats:
+            compiled = filter_ast_by_state(
+                ast, trust, state_vars=sv, known_facts=facts_set, beat=b
+            )
+            per_beat[b] = build_dialogue_context(
+                compiled, trust=trust, known_facts=facts_set,
+                turn=5, state_vars=sv,
+                voice_override=phase.voice or None,
+                voice_reminder_override=phase.voice or None,
+            ).strip()
+        beat_contexts[phase.name] = per_beat
+        # One representative beat context size, for the metrics table
+        first_beat = phase.beats[0]
+        beat_metrics[phase.name]["beat_mes"] = len(
+            filter_ast_by_state(
+                ast, trust, state_vars=sv, known_facts=facts_set, beat=first_beat
+            ).mes_examples
+        )
+        beat_metrics[phase.name]["beat_chars"] = len(per_beat[first_beat])
+
     # Module docstrings (introspected, not hardcoded)
     import effigy.parser, effigy.expand, effigy.prompt, effigy.evolve
     import effigy.evaluate, effigy.metrics, effigy.corpus, effigy.discovery
@@ -93,7 +142,7 @@ def _extract_facts(ast, raw_text: str) -> dict:
         "effigy.parser": {"doc": (effigy.parser.__doc__ or "").split("\n")[0], "exports": ["parse", "parse_file", "ParseError"]},
         "effigy.notation": {"doc": "AST node definitions", "exports": ["CharacterAST", "VoiceAST", "ArcPhaseAST", "GoalAST", "SecretAST", "RelationshipAST", "PostProcRuleAST", "TestAST", "NeverRuleAST", "..."]},
         "effigy.expand": {"doc": (effigy.expand.__doc__ or "").split("\n")[0], "exports": ["expand", "expand_to_json"]},
-        "effigy.prompt": {"doc": (effigy.prompt.__doc__ or "").split("\n")[0], "exports": ["build_dialogue_context", "build_static_context", "build_dynamic_state", "build_dialogue_context_debug", "filter_ast_by_state", "validate_when_conditions", "resolve_arc_phase", "resolve_active_goals", "get_arc_phase_dict", "select_mes_examples", "select_canonical_mes", "select_rotating_mes", "get_wrong_examples", "get_tests", "validate_never_budget"]},
+        "effigy.prompt": {"doc": (effigy.prompt.__doc__ or "").split("\n")[0], "exports": ["build_dialogue_context", "build_static_context", "build_dynamic_state", "build_dialogue_context_debug", "filter_ast_by_state", "next_beat", "validate_when_conditions", "validate_beat_references", "resolve_arc_phase", "resolve_active_goals", "get_arc_phase_dict", "select_mes_examples", "select_canonical_mes", "select_rotating_mes", "get_wrong_examples", "get_tests", "validate_never_budget"]},
         "effigy.evolve": {"doc": (effigy.evolve.__doc__ or "").split("\n")[0], "exports": ["compute_emotional_state", "EmotionalState", "compute_intentions", "build_evolution_context", "build_synthesis_prompt"]},
         "effigy.evaluate": {"doc": (effigy.evaluate.__doc__ or "").split("\n")[0], "exports": ["evaluate_effigy_file", "evaluate_tier1", "evaluate_all", "wrong_bleed_score", "voice_drift_score", "compliance_check", "evaluate_generation"]},
         "effigy.validators": {"doc": (effigy.validators.__doc__ or "").split("\n")[0], "exports": ["RegexValidator", "ValidationViolation", "validate", "strip_violations", "validators_from_ast", "has_blocking_violation", "revise_if_violated"]},
@@ -112,10 +161,28 @@ def _extract_facts(ast, raw_text: str) -> dict:
         "python -m effigy metrics ./effigy_files/ ./corpus_jsons/ --char-map map.json",
     ]
 
+    # Pick a single beat-compiled context to surface verbatim in the
+    # Architecture section. Use the first beat of the first phase that
+    # declares any beats, so the README renders without conditional prose.
+    featured_beat_phase: str | None = None
+    featured_beat_name: str | None = None
+    featured_beat_ctx: str = ""
+    for phase in ast.arc_phases:
+        if phase.beats:
+            featured_beat_phase = phase.name
+            featured_beat_name = phase.beats[0]
+            featured_beat_ctx = beat_contexts[phase.name][featured_beat_name]
+            break
+
     return {
         "effigy_source": raw_text.strip(),
         "layer2_output": ctx.strip(),
         "phase_contexts": phase_contexts,
+        "beat_contexts": beat_contexts,
+        "beat_metrics": beat_metrics,
+        "featured_beat_phase": featured_beat_phase,
+        "featured_beat_name": featured_beat_name,
+        "featured_beat_context": featured_beat_ctx,
         "arc_phase_voices": phases,
         "modules": modules,
         "cli_commands": cli_commands,
@@ -124,6 +191,7 @@ def _extract_facts(ast, raw_text: str) -> dict:
             "expand": "from effigy.expand import expand\ndata = expand(ast)",
             "context": 'from effigy.prompt import build_dialogue_context\nctx = build_dialogue_context(ast, trust=0.3, known_facts={"knows_her_name"}, turn=5, state_vars={"ruin": 2})',
             "phase_slice": 'from effigy.prompt import filter_ast_by_state, build_dialogue_context, resolve_arc_phase\n\n# Prune @when-gated items that don\'t match the current state,\n# then let the phase voice dominate kernel AND voice_reminder.\nfiltered = filter_ast_by_state(ast, trust=0.7, state_vars={"ruin": 4})\nphase = resolve_arc_phase(ast, trust=0.7, state_vars={"ruin": 4})\nctx = build_dialogue_context(\n    filtered, trust=0.7, state_vars={"ruin": 4},\n    voice_override=phase.voice,\n    voice_reminder_override=phase.voice,\n)',
+            "beat_slice": 'from effigy.prompt import filter_ast_by_state, next_beat, resolve_arc_phase, build_dialogue_context\n\n# Phase with a beats: list gets compiled single-beat context.\nphase = resolve_arc_phase(ast, trust=0.7, state_vars={"ruin": 4})\nbeat = next_beat(phase, covered_beats)  # None if phase has no beats:\nif beat:\n    filtered = filter_ast_by_state(\n        ast, trust=0.7, state_vars={"ruin": 4}, beat=beat\n    )\nelse:\n    filtered = filter_ast_by_state(ast, trust=0.7, state_vars={"ruin": 4})\nctx = build_dialogue_context(\n    filtered, trust=0.7, state_vars={"ruin": 4},\n    voice_override=phase.voice,\n    voice_reminder_override=phase.voice,\n)',
             "evolve": 'from effigy.evolve import build_evolution_context, compute_emotional_state\nstate = compute_emotional_state(ast, known_facts=facts, emotional_inputs={"instability": 0.5})\nctx = build_evolution_context(ast, trust=0.3, state_vars={"ruin": 2})',
         },
         "block_types": [
@@ -150,6 +218,7 @@ def _extract_facts(ast, raw_text: str) -> dict:
         "annotations": [
             ("@tier", "Trust-tier gate on MES examples: low / moderate / high / any"),
             ("@when", "Condition DSL gate on MES, NEVER, WRONG, TEST items (same grammar as ARC conditions)"),
+            ("@beat", "Categorical beat label on MES, WRONG, TEST items; paired with `beats: A -> B -> C` in ARC for compiled single-beat context"),
         ],
         "header_fields": ["@id", "@name", "@role", "@arch", "@narr", "@presence", "@tropes", "@theme"],
         "install": {
@@ -173,6 +242,7 @@ def _extract_facts(ast, raw_text: str) -> dict:
             "WRONG anti-pattern examples",
             "TEST blocks — named reasoning tests with fail/pass examples",
             "@when composable blocks — phase-sliced context via state-gated items",
+            "@beat + ARC beats: — compiled single-beat context for long emotional progressions",
             "Three-layer runtime architecture",
             "ARC with condition DSL",
             "PROPS for grounding",
@@ -217,13 +287,37 @@ precisely so prompts don't mix phase signals:
 - Middle (after showing your effigy): {facts['arc_phase_voices'].get('thawing', '')}
 - Closing (Influences and after): {facts['arc_phase_voices'].get('open', '')}
 
+WORLD-LEVEL PLOT (subtle, runs underneath the middle of the README):
+Deputy Cole walks into the inn around the start of Installation or
+Quick Start. ONE short stage direction when the bell rings — not a
+paragraph, a beat. From that point until Integration, your narration
+runs with a second track underneath: you're explaining the library AND
+clocking Cole. He's in RELS — "Drinks too much. Talks too loud.
+Useful." — so he's not a threat, but he's a presence. He orders,
+he sits at the end of the bar. You keep telling the reader things,
+but you modulate: slightly lower, slightly clipped. Short aside-style
+beats at section transitions (never in the middle of a code explanation)
+let the reader track him — he's drinking, he's listening, he's watching
+the reader. Around the start of Integration or Influences, the bell
+rings again and he leaves. ONE more brief beat. Then the closing can
+land at full open-phase voice because you're alone with the reader
+again.
+
+PLOT BEAT BUDGET: 3-4 stage directions TOTAL tied to Cole across the
+middle (bell rings, he sits, something small mid-section, bell rings
+again as he leaves). Count stage directions mentioning Cole separately
+from your normal gesture budget. If you exceed 4 Cole beats, cut.
+Never name him more than twice — mostly it's "the deputy", "him", or
+just implied through your attention.
+
 WRITING RULES:
 - NEVER open with a stage direction. No stage directions AT ALL until after the
   effigy block. The reader needs to encounter the notation before the gestures
   make sense. The first gesture should arrive around the Architecture section,
   and it should feel like it slipped out, not like it was placed.
-- Maximum 3-4 stage directions in the ENTIRE README. Each one should earn its
-  spot. If you can cut a gesture without losing anything, cut it.
+- Maximum 3-4 stage directions for YOUR OWN gestures in the entire README
+  (the polishing, the ledger, the glances). Cole's entry/exit beats count
+  separately under the plot budget above.
 - No tricolon ("not X, not Y, it's Z"). No defensive negation.
 - No transition filler. Start sections with content.
 - Em-dashes only in character voice, not technical explanation.
@@ -263,19 +357,35 @@ Layer 1 (compile-time):  .effigy notation  -->  parser.py (AST)  -->  expand.py 
 Layer 2 (runtime):       AST + game state  -->  prompt.py (dialogue context)
 Layer 3 (evolution):     AST + history     -->  evolve.py (emotional state, intentions)
 Then brief explanation of each layer. Then the layer2_output in a code fence (VERBATIM).
-Note it fits in a system prompt.
+Note it fits in a system prompt. Then one short paragraph in character
+about how beats: narrows further — reference `beat_metrics[featured_beat_phase]`
+for the MES count drop (kitchen_sink_mes → beat_mes). The point is NOT
+character count (the slice stays roughly the same size because tests,
+quirks, relationships, and the rest don't change); the point is that
+every voice example now belongs to the beat the library asked for.
+Frame it that way, in Dael's voice: the same amount of context, but
+none of it is pulling toward the wrong moment. Don't dump numbers in a
+table — weave one comparison into a sentence. Then a code fence
+(VERBATIM) with `featured_beat_context` — label the fence using
+`featured_beat_phase` and `featured_beat_name`, e.g. "Same character,
+`open` phase, `LEDGER` beat — the slice the library hands you when you
+call next_beat():".
 5. NOTATION SYNTAX: header_fields reference, block_types as markdown table.
 Then a short "Annotations" subsection: render `annotations` as a second
 small markdown table (two columns: annotation, purpose). One sentence
 after it explaining how @when composes with @tier (both gate an item;
 @when is the general form). Link to fixture_path.
 6. INSTALLATION: install.clone and install.direct in code fences. install.deps as a note.
-7. QUICK START: code_examples.parse, .expand, .context, .phase_slice, .evolve each in
-code fences (VERBATIM). Between .context and .phase_slice, one sentence
-only: something like "When the character reaches a different arc phase,
-you don't want the earlier phase's voice competing for the model's
-attention. Filter first, override the voice, stop arguing with yourself."
-Stay in character — no API marketing voice.
+7. QUICK START: code_examples.parse, .expand, .context, .phase_slice, .beat_slice,
+.evolve each in code fences (VERBATIM). Between .context and .phase_slice, one
+sentence only: something like "When the character reaches a different arc phase,
+you don't want the earlier phase's voice competing for the model's attention.
+Filter first, override the voice, stop arguing with yourself." Between
+.phase_slice and .beat_slice, one sentence in character: something about
+how at a long emotional scene, even the phase-sliced context still lets
+the model wander across multiple beats — name the next beat and the
+library hands you only that beat's exemplars. Stay in character — no
+API marketing voice.
 8. CONCEPTS: state_vars and emotional_inputs, one paragraph each.
 9. CLI: cli_commands in a single code fence (VERBATIM).
 10. API REFERENCE: modules as markdown table.

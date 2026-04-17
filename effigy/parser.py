@@ -267,11 +267,12 @@ def _parse_traits_block(content: str) -> list[str]:
 
 @dataclass
 class MESExample:
-    """A single MES dialogue example with optional trust tier and @when gate."""
+    """A single MES dialogue example with optional trust tier, @when gate, @beat label."""
 
     text: str
     tier: str = "any"  # "low", "moderate", "high", or "any"
     when: str = ""  # condition DSL string; empty or "*" = always active
+    beat: str = ""  # beat label; empty = universal for the phase
 
 
 def _parse_mes_block(content: str) -> list[MESExample]:
@@ -284,19 +285,21 @@ def _parse_mes_block(content: str) -> list[MESExample]:
       1. Structured: ``@tier low`` line before the example
       2. Convention: ``# LOW TRUST:`` comment line (legacy)
     """
-    # Split on --- but preserve @tier, @when, and # TRUST annotations
-    items: list[tuple[list[str], str, str]] = []
+    # Split on --- but preserve @tier, @when, @beat, and # TRUST annotations
+    items: list[tuple[list[str], str, str, str]] = []
     current_lines: list[str] = []
     current_tier = "any"
     current_when = ""
+    current_beat = ""
     for line in content.split("\n"):
         stripped = line.strip()
         if stripped == "---":
             if current_lines:
-                items.append((current_lines, current_tier, current_when))
+                items.append((current_lines, current_tier, current_when, current_beat))
                 current_lines = []
                 current_tier = "any"  # reset for next item
                 current_when = ""
+                current_beat = ""
             continue
         # Structured tier annotation
         if stripped.startswith("@tier"):
@@ -307,6 +310,10 @@ def _parse_mes_block(content: str) -> list[MESExample]:
         # @when condition gate — same DSL as ARC phases
         if stripped.startswith("@when"):
             current_when = stripped[5:].strip()
+            continue
+        # @beat label (categorical, not conditional)
+        if stripped.startswith("@beat"):
+            current_beat = stripped[5:].strip()
             continue
         # Legacy comment-based tier annotation
         if stripped.startswith("#"):
@@ -322,10 +329,10 @@ def _parse_mes_block(content: str) -> list[MESExample]:
         if stripped:
             current_lines.append(line)
     if current_lines:
-        items.append((current_lines, current_tier, current_when))
+        items.append((current_lines, current_tier, current_when, current_beat))
 
     result: list[MESExample] = []
-    for lines, tier, when in items:
+    for lines, tier, when, beat in items:
         clean = [l.strip() for l in lines if l.strip()]
         if not clean:
             continue
@@ -336,7 +343,7 @@ def _parse_mes_block(content: str) -> list[MESExample]:
             text = " ".join(clean)
             if not text.startswith("{{char}}:"):
                 text = "{{char}}: " + text
-        result.append(MESExample(text=text, tier=tier, when=when))
+        result.append(MESExample(text=text, tier=tier, when=when, beat=beat))
     return result
 
 
@@ -346,13 +353,14 @@ def _parse_uncertainty_block(content: str) -> list[str]:
 
 
 def _parse_arc_block(content: str) -> list[ArcPhaseAST]:
-    """Parse ARC{phase → conditions; voice: ...}."""
+    """Parse ARC{phase → conditions; voice: ...; beats: A -> B -> C}."""
     phases = []
     # Split on phase declarations: lines with → or ->
     current_name = ""
     current_conditions: dict = {}
     current_voice = ""
     current_deflection = ""
+    current_beats: list[str] | None = None
     current_condition_str = ""
     _last_field = "voice"
 
@@ -373,6 +381,7 @@ def _parse_arc_block(content: str) -> list[ArcPhaseAST]:
                         condition_str=current_condition_str,
                         voice=current_voice,
                         deflection=current_deflection,
+                        beats=current_beats,
                     )
                 )
             current_name = arrow_match.group(1)
@@ -381,6 +390,7 @@ def _parse_arc_block(content: str) -> list[ArcPhaseAST]:
             current_conditions = _parse_conditions(raw_cond)
             current_voice = ""
             current_deflection = ""
+            current_beats = None
             _last_field = "voice"
             continue
 
@@ -398,8 +408,17 @@ def _parse_arc_block(content: str) -> list[ArcPhaseAST]:
             _last_field = "deflection"
             continue
 
+        # Beats line within a phase: "beats: A -> B -> C"
+        beats_match = re.match(r"^beats:\s*(.+)$", stripped)
+        if beats_match:
+            raw_beats = beats_match.group(1).strip()
+            parts = re.split(r"\s*(?:→|->)\s*", raw_beats)
+            current_beats = [p.strip() for p in parts if p.strip()] or None
+            _last_field = "beats"
+            continue
+
         # Continuation of last field
-        if current_name and not stripped.startswith(("voice:", "deflection:")):
+        if current_name and not stripped.startswith(("voice:", "deflection:", "beats:")):
             if _last_field == "deflection" and current_deflection:
                 current_deflection += " " + stripped
             elif _last_field == "voice" and current_voice:
@@ -417,6 +436,7 @@ def _parse_arc_block(content: str) -> list[ArcPhaseAST]:
                 condition_str=current_condition_str,
                 voice=current_voice,
                 deflection=current_deflection,
+                beats=current_beats,
             )
         )
 
@@ -771,6 +791,7 @@ def _parse_wrong_block(content: str) -> list[WrongExampleAST]:
         right = ""
         why = ""
         when = ""
+        beat = ""
 
         for line in item.strip().split("\n"):
             line = line.strip()
@@ -778,6 +799,8 @@ def _parse_wrong_block(content: str) -> list[WrongExampleAST]:
                 continue
             if line.startswith("@when"):
                 when = line[5:].strip()
+            elif line.startswith("@beat"):
+                beat = line[5:].strip()
             elif line.startswith("#"):
                 # Comment line -- use as context description
                 context = line.lstrip("# ").strip()
@@ -798,6 +821,7 @@ def _parse_wrong_block(content: str) -> list[WrongExampleAST]:
                     right=right,
                     why=why,
                     when=when,
+                    beat=beat,
                 )
             )
 
@@ -826,6 +850,7 @@ def _parse_test_block(content: str) -> list[TestAST]:
         pass_examples: list[str] = []
         why = ""
         when = ""
+        beat = ""
 
         for line in item.strip().split("\n"):
             line = line.strip()
@@ -833,6 +858,9 @@ def _parse_test_block(content: str) -> list[TestAST]:
                 continue
             if line.startswith("@when"):
                 when = line[5:].strip()
+                continue
+            if line.startswith("@beat"):
+                beat = line[5:].strip()
                 continue
             low = line.lower()
             if low.startswith("name:"):
@@ -858,6 +886,7 @@ def _parse_test_block(content: str) -> list[TestAST]:
                     why=why,
                     dimension=dimension,
                     when=when,
+                    beat=beat,
                 )
             )
 

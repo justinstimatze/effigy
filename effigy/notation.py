@@ -132,6 +132,7 @@ class ArcPhaseAST:
     condition_str: str = ""  # raw condition DSL string for conditions.evaluate()
     voice: str = ""  # voice shift description for this phase
     deflection: str = ""  # how to deflect unknown topics at this phase
+    beats: list[str] | None = None  # authored beat progression (None = no rotation)
 
 
 @dataclass
@@ -143,6 +144,7 @@ class WrongExampleAST:
     right: str = ""  # the correct response (what TO generate instead)
     why: str = ""  # explanation of why the wrong response is wrong
     when: str = ""  # condition DSL gate; empty or "*" = always active
+    beat: str = ""  # beat label; empty = universal for the phase
 
 
 @dataclass
@@ -161,6 +163,7 @@ class TestAST:
     why: str = ""
     dimension: str = ""  # optional: "voice", "agency", "knowledge", etc.
     when: str = ""  # condition DSL gate; empty or "*" = always active
+    beat: str = ""  # beat label; empty = universal for the phase
 
 
 @dataclass

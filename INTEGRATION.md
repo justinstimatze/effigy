@@ -230,7 +230,7 @@ move out of the narrator and into the effigy:
 | `voice_override` param in your narrator call | `build_dialogue_context(voice_override=phase.voice)` |
 | MES-swapping by game state inside the narrator | `@when` gates inside the MES block |
 | Phase-specific NEVER rules in the narrator prompt | `@when`-gated NEVER rules (frees NEVER budget) |
-| Beat detection for MES selection | v0.6.0 `@group` + classifier (planned) |
+| Beat rotation with parallel exemplar data | `@beat` on MES + `beats:` in ARC + `next_beat` (v0.6.0) |
 
 ### Pre-commit validation
 
@@ -263,6 +263,137 @@ if errors:
 Wire into CI or a pre-commit hook. `validate_when_conditions` flags both
 unparseable conditions and conditions with unrecognized state-variable
 tokens that fell through to the `raw` bucket.
+
+## 2.6 Beat-Level Compilation (v0.6.0)
+
+Phase slicing (`@when`) removes off-phase content. Beat slicing (`@beat`)
+goes one level deeper: at the emotional climax of a long scene, a
+character may have a multi-beat progression (KNOWING → CHOICE → COST → …)
+that has to cycle without repetition. Kitchen-sink context lets the LLM
+drift between beats mid-response. Compiled single-beat context
+structurally prevents drift by only showing the LLM one beat's worth of
+examples at a time.
+
+### Authoring @beat
+
+`@beat NAME` is a categorical label (distinct from `@when`, which is a
+state condition). It composes with `@when` and `@tier`:
+
+```
+MES[
+# Universal — shown at every beat of the phase.
+{{char}}: Coffee's fresh. Sit wherever.
+---
+@when trust>=0.6 AND ruin>=4
+@beat KNOWING
+{{char}}: *still* I knew. Not the details. Not what you found.
+---
+@when trust>=0.6 AND ruin>=4
+@beat KNOWING
+{{char}}: *flat hand* I chose not to ask what of.
+---
+@when trust>=0.6 AND ruin>=4
+@beat COST
+{{char}}: *not moving* I served Tom breakfast every morning.
+---
+@when trust>=0.6 AND ruin>=4
+@beat COST
+{{char}}: *still* I poured their coffee.
+]
+```
+
+Declare the beat progression in the ARC phase (the order is authored —
+deterministic rotation):
+
+```
+ARC{
+  resolved → trust>=0.6 AND ruin>=4
+    voice: "PLAIN. Self-implicating. Staccato."
+    beats: KNOWING -> CHOICE -> COST -> BILL -> WHAT_NOW
+}
+```
+
+`@beat` is valid on MES, WRONG, and TEST. Not on NEVER — rules are
+constraints, not exemplars.
+
+### Beat compilation in your bridge
+
+The caller owns beat selection and final prompt assembly. Effigy provides
+the filter query and the rotation helper:
+
+```python
+from effigy.prompt import (
+    build_dialogue_context,
+    filter_ast_by_state,
+    next_beat,
+    resolve_arc_phase,
+)
+
+phase = resolve_arc_phase(
+    ast, trust=trust, state_vars=state_vars, known_facts=known_facts
+)
+beat = next_beat(phase, covered_beats)  # None if phase has no beats:
+if beat:
+    filtered = filter_ast_by_state(
+        ast, trust=trust, state_vars=state_vars,
+        known_facts=known_facts, beat=beat,
+    )
+    # compiled single-beat path
+else:
+    filtered = filter_ast_by_state(
+        ast, trust=trust, state_vars=state_vars, known_facts=known_facts
+    )
+    # kitchen-sink path
+
+override = phase.voice if phase and phase.voice else None
+ctx = build_dialogue_context(
+    filtered, trust=trust, known_facts=known_facts,
+    turn=turn, state_vars=state_vars,
+    voice_override=override,
+    voice_reminder_override=override,
+)
+# Caller adds ground truth + conversation state — orchestration is not
+# a library concern.
+final = f"{ground_truth}\n\n{ctx}\n\n## Conversation so far\n{convo}"
+```
+
+Semantics of `next_beat`:
+
+- `None` when `phase` is `None` or the phase has no `beats:` list. Caller
+  uses this as a clean gate between compiled and kitchen-sink paths.
+- First uncovered beat in authored order when `covered` is partial.
+- `phase.beats[0]` when all are covered — cycles back. The caller
+  decides when to reset `covered_beats` (e.g., when the scene ends).
+
+### Beat validation
+
+Cross-reference `@beat` names against `beats:` lists at pre-commit time:
+
+```python
+from effigy.prompt import validate_beat_references
+
+for err in validate_beat_references(ast):
+    errors.append(f"{path}: {err}")
+```
+
+Flags:
+
+- `ERROR` — `@beat NAME` that doesn't appear in any phase's `beats:`
+  list (typo catcher).
+- `ERROR` — declared beat with fewer than 2 MES exemplars (below this
+  the compiled path produces degenerate output).
+- `WARN` — declared beat with fewer than 3 MES exemplars (generation
+  quality degrades below this threshold).
+
+### What this replaces in the caller
+
+| Caller-side workaround | Library-supported replacement |
+|---|---|
+| Parallel `_BeatConfig` + `cluster_map` module | `beats:` list in ARC phase |
+| Exemplar lists duplicated outside the `.effigy` | `@beat` on MES items |
+| `_exemplars_for_beat(entry, config, beat, n=5)` helper | `filter_ast_by_state(ast, ..., beat="COST")` |
+| `select_next_beat(covered)` with hardcoded order | `next_beat(phase, covered)` |
+| Custom `_build_compiled_system` / `_build_compiled_prompt` | `build_dialogue_context(voice_override=...)` — caller wraps for ground truth / conversation state |
 
 ## 3. Narrator System Prompt
 

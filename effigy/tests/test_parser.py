@@ -509,6 +509,106 @@ TEST[
         assert ast.tests[0].pass_examples == ["good example"]
 
 
+class TestBeatAnnotations:
+    def test_beat_on_mes(self):
+        text = """@id x
+MES[
+{{char}}: universal line.
+---
+@beat COST
+{{char}}: *not moving* I served them breakfast every morning.
+---
+@beat BILL
+{{char}}: He was a shift foreman. Went to work.
+]
+"""
+        ast = parse(text)
+        assert len(ast.mes_examples) == 3
+        assert ast.mes_examples[0].beat == ""
+        assert ast.mes_examples[1].beat == "COST"
+        assert ast.mes_examples[2].beat == "BILL"
+
+    def test_beat_resets_between_items(self):
+        text = """@id x
+MES[
+@beat COST
+{{char}}: first.
+---
+{{char}}: second has no beat.
+]
+"""
+        ast = parse(text)
+        assert ast.mes_examples[0].beat == "COST"
+        assert ast.mes_examples[1].beat == ""
+
+    def test_beat_composes_with_when_and_tier(self):
+        text = """@id x
+MES[
+@tier high
+@when trust>=0.6
+@beat COST
+{{char}}: gated and beat-tagged.
+]
+"""
+        ast = parse(text)
+        ex = ast.mes_examples[0]
+        assert ex.beat == "COST"
+        assert ex.when == "trust>=0.6"
+        assert ex.tier == "high"
+
+    def test_beat_on_wrong(self):
+        text = """@id x
+WRONG[
+@beat COST
+{{user}}: Did you know?
+WRONG: "I heard nothing."
+RIGHT: "I served coffee."
+WHY: abstraction hides complicity.
+]
+"""
+        ast = parse(text)
+        assert ast.wrong_examples[0].beat == "COST"
+
+    def test_beat_on_test(self):
+        text = """@id x
+TEST[
+@beat COST
+  name: DAILY LABOR TEST
+  question: Does this line name daily complicity?
+  fail: "I lost sixty years"
+  pass: "I served Tom breakfast."
+  why: specific daily action, not abstraction.
+]
+"""
+        ast = parse(text)
+        assert ast.tests[0].beat == "COST"
+
+    def test_beats_in_arc(self):
+        text = """@id x
+ARC{
+  guarded → trust>=0.0
+    voice: "Polite."
+  resolved → trust>=0.6 AND ruin>=4
+    voice: "Plain."
+    beats: KNOWING -> CHOICE -> COST -> BILL -> WHAT_NOW
+}
+"""
+        ast = parse(text)
+        assert ast.arc_phases[0].beats is None
+        assert ast.arc_phases[1].beats == ["KNOWING", "CHOICE", "COST", "BILL", "WHAT_NOW"]
+
+    def test_beats_unicode_arrow(self):
+        text = """@id x
+ARC{
+  resolved → trust>=0.6
+    voice: "Plain."
+    beats: A → B → C
+}
+"""
+        ast = parse(text)
+        assert ast.arc_phases[0].beats == ["A", "B", "C"]
+
+
 class TestTheme:
     def test_parse_theme_header(self):
         text = "@id x\n@theme The cost of loyalty to the dead\n"

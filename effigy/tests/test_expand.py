@@ -202,6 +202,33 @@ TEST[
         result = expand(ast)
         assert "tests" not in result
 
+    def test_beat_serialized_when_present(self):
+        text = """@id x
+TEST[
+@beat COST
+  name: T
+  question: q?
+  fail: bad
+  pass: good
+]
+"""
+        ast = parse(text)
+        result = expand(ast)
+        assert result["tests"][0]["beat"] == "COST"
+
+    def test_beat_omitted_when_absent(self):
+        text = """@id x
+TEST[
+  name: T
+  question: q?
+  fail: bad
+  pass: good
+]
+"""
+        ast = parse(text)
+        result = expand(ast)
+        assert "beat" not in result["tests"][0]
+
 
 class TestExpandNeverWithWhen:
     def test_plain_strings_when_no_gate(self):

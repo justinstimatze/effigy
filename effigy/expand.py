@@ -155,6 +155,8 @@ def expand(ast: CharacterAST) -> dict:
                 td["pass_examples"] = list(t.pass_examples)
             if t.why:
                 td["why"] = t.why
+            if t.beat:
+                td["beat"] = t.beat
             result["tests"].append(td)
 
     return result
