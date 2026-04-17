@@ -518,6 +518,11 @@ def filter_ast_by_state(
     ``beat`` attribute, so beat filtering never removes them — they're
     constraints, not exemplars.
 
+    Falsy ``beat`` values (``None`` or ``""``) disable the beat filter
+    entirely — ``beat=""`` is a forgiving no-op rather than "keep only
+    universals," so callers can pass ``classifier.choice or ""`` without
+    special-casing an empty classifier output.
+
     This function does not mutate ``ast``. Items not subject to
     ``@when`` filtering are shared by reference with the input AST.
     """
@@ -529,7 +534,7 @@ def filter_ast_by_state(
         when = getattr(item, "when", "")
         if when and not _when_matches(when, trust, state_vars, known_facts, char_id):
             return False
-        if beat is not None:
+        if beat:  # falsy (None or "") → beat filter disabled
             item_beat = getattr(item, "beat", "")
             if item_beat and item_beat != beat:
                 return False
@@ -695,7 +700,25 @@ def validate_beat_references(ast: CharacterAST) -> list[str]:
             mes_counts[b] = mes_counts.get(b, 0) + 1
 
     for phase_name, beats in beats_by_phase.items():
+        # Dedupe while preserving authored order and flag any duplicates
+        # as their own ERROR. Without dedup we'd report the same
+        # exemplar-count finding once per occurrence.
+        seen: set[str] = set()
+        unique_beats: list[str] = []
+        dupes: list[str] = []
         for beat_name in beats:
+            if beat_name in seen:
+                if beat_name not in dupes:
+                    dupes.append(beat_name)
+            else:
+                seen.add(beat_name)
+                unique_beats.append(beat_name)
+        for d in dupes:
+            errors.append(
+                f"ERROR phase {phase_name!r}: beat {d!r} appears multiple "
+                f"times in beats: list"
+            )
+        for beat_name in unique_beats:
             count = mes_counts.get(beat_name, 0)
             if count < MIN_EXEMPLARS_PER_BEAT_ERROR:
                 errors.append(

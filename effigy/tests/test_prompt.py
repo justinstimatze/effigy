@@ -1718,6 +1718,105 @@ MES[
         assert validate_beat_references(ast) == []
 
 
+class TestBeatFilterFalsy:
+    """v0.6.1: beat='' is a no-op, same as beat=None."""
+
+    def test_empty_string_disables_beat_filter(self):
+        from effigy.prompt import filter_ast_by_state
+
+        text = """@id x
+MES[
+{{char}}: universal.
+---
+@beat X
+{{char}}: tagged.
+]
+"""
+        ast = parse(text)
+        # With beat="" the tagged item is kept (beat filter disabled).
+        assert len(filter_ast_by_state(ast, beat="").mes_examples) == 2
+
+    def test_none_also_disables(self):
+        from effigy.prompt import filter_ast_by_state
+
+        text = """@id x
+MES[
+@beat X
+{{char}}: tagged.
+]
+"""
+        ast = parse(text)
+        assert len(filter_ast_by_state(ast, beat=None).mes_examples) == 1
+
+
+class TestValidateBeatDuplicates:
+    """v0.6.1: duplicate beat names in beats: list flagged once as ERROR."""
+
+    def test_duplicate_beats_flagged(self):
+        from effigy.prompt import validate_beat_references
+
+        text = """@id x
+
+ARC{
+  p → trust>=0.0
+    voice: "v."
+    beats: A -> A -> B
+}
+
+MES[
+@beat A
+{{char}}: a1.
+---
+@beat A
+{{char}}: a2.
+---
+@beat B
+{{char}}: b1.
+---
+@beat B
+{{char}}: b2.
+]
+"""
+        ast = parse(text)
+        errors = validate_beat_references(ast)
+        # Exactly one "appears multiple times" line for beat A.
+        duplicate_errors = [e for e in errors if "appears multiple times" in e]
+        assert len(duplicate_errors) == 1
+        assert "'A'" in duplicate_errors[0]
+        # And per-beat exemplar findings aren't double-reported.
+        beat_a_findings = [e for e in errors if "beat 'A'" in e and "appears" not in e]
+        assert len(beat_a_findings) == 1
+
+
+class TestParserBeatsContinuation:
+    """v0.6.1: stray line after `beats:` doesn't leak into ARC conditions."""
+
+    def test_stray_line_after_beats_ignored(self):
+        text = """@id x
+ARC{
+  p → trust>=0.0
+    voice: "v."
+    beats: A -> B
+    stray_line
+}
+"""
+        ast = parse(text)
+        phase = ast.arc_phases[0]
+        assert phase.beats == ["A", "B"]
+        # The stray line must not have been parsed as a condition.
+        assert "raw" not in phase.conditions
+        assert "stray_line" not in str(phase.conditions)
+
+
+class TestVersionString:
+    """v0.6.1: __version__ tracks the tagged release."""
+
+    def test_version_matches_release(self):
+        import effigy
+
+        assert effigy.__version__ == "0.6.1"
+
+
 class TestBeatOnWrongAndTestAccessors:
     def test_get_wrong_examples_includes_beat(self):
         from effigy.prompt import get_wrong_examples

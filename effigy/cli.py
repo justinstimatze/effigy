@@ -93,9 +93,14 @@ def cmd_compile(args: argparse.Namespace) -> None:
 
 
 def cmd_validate(args: argparse.Namespace) -> None:
-    """Validate a .effigy file: NEVER budget + MES/NEVER contradictions."""
+    """Validate a .effigy file: NEVER budget + MES/NEVER contradictions +
+    @when parse errors + @beat references."""
     from effigy.parser import ParseError, parse
-    from effigy.prompt import validate_never_budget
+    from effigy.prompt import (
+        validate_beat_references,
+        validate_never_budget,
+        validate_when_conditions,
+    )
 
     path = Path(args.file)
     if not path.exists():
@@ -109,6 +114,7 @@ def cmd_validate(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     had_warning = False
+    had_error = False
 
     for w in validate_never_budget(ast):
         had_warning = True
@@ -124,16 +130,27 @@ def cmd_validate(args: argparse.Namespace) -> None:
             print(f"    [{i}] {preview}")
         print("  Consider: consolidate related rules, or promote critical ones with CRITICAL: prefix.")
 
+    for err in validate_when_conditions(ast):
+        had_error = True
+        print(f"ERROR (@when): {err}")
+
+    for msg in validate_beat_references(ast):
+        if msg.startswith("ERROR"):
+            had_error = True
+        else:
+            had_warning = True
+        print(msg)
+
     contradictions = _check_mes_never_contradictions(ast)
     for warning in contradictions:
         had_warning = True
         print(f"WARNING: {warning}")
 
-    if not had_warning:
+    if not had_warning and not had_error:
         print(f"OK: {ast.char_id} ({len(ast.never_would_say)} NEVER rules, within cap)")
         return
 
-    if args.strict:
+    if had_error or args.strict:
         sys.exit(1)
 
 

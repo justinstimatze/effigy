@@ -423,6 +423,11 @@ def _parse_arc_block(content: str) -> list[ArcPhaseAST]:
                 current_deflection += " " + stripped
             elif _last_field == "voice" and current_voice:
                 current_voice += " " + stripped
+            elif _last_field == "beats":
+                # beats: is single-line by design; a stray follow-on line
+                # is an authoring error. Ignore it rather than letting it
+                # leak into _parse_conditions.
+                pass
             elif ":" not in stripped:
                 # Additional condition line
                 current_conditions.update(_parse_conditions(stripped))
