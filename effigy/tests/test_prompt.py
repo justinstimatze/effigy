@@ -1809,12 +1809,32 @@ ARC{
 
 
 class TestVersionString:
-    """v0.6.1: __version__ tracks the tagged release."""
+    """v0.6.1+: __version__ tracks the tagged release.
+
+    v0.6.2 added a matching check: pyproject.toml and __init__.py must
+    agree, because pip-installed packages read pyproject.toml for their
+    dist-info version while Python code reads __init__.__version__.
+    """
 
     def test_version_matches_release(self):
         import effigy
 
-        assert effigy.__version__ == "0.6.1"
+        assert effigy.__version__ == "0.6.2"
+
+    def test_pyproject_version_matches_init(self):
+        """Catch the v0.6.0/v0.6.1 footgun where pyproject lagged behind."""
+        from pathlib import Path
+        import re
+
+        import effigy
+
+        pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
+        m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
+        assert m, "pyproject.toml has no version field"
+        assert m.group(1) == effigy.__version__, (
+            f"pyproject.toml version {m.group(1)!r} != "
+            f"effigy.__version__ {effigy.__version__!r}"
+        )
 
 
 class TestBeatOnWrongAndTestAccessors:
