@@ -1913,7 +1913,7 @@ class TestVersionString:
     def test_version_matches_release(self):
         import effigy
 
-        assert effigy.__version__ == "0.6.3"
+        assert effigy.__version__ == "0.7.0"
 
     def test_pyproject_version_matches_init(self):
         """Catch the v0.6.0/v0.6.1 footgun where pyproject lagged behind."""

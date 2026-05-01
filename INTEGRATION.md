@@ -472,6 +472,54 @@ Wire `validate_beat_references` into your pre-commit script (alongside
 `validate_when_conditions` and `validate_never_budget`) so the warn
 surfaces at authoring time rather than as a billing line item.
 
+## 2.7 Cross-character voice tic audit (v0.7.0)
+
+When one author writes many characters, distinctive author-vocabulary
+leaks across the corpus. The LLM picks up the shared substrate and bleeds
+it across characters that should sound distinct. `effigy audit` is a
+purely-static (no LLM) pass over a corpus that surfaces tokens shared by
+many characters' voice surface.
+
+It tokenizes everything the LLM sees as voice exemplar:
+
+- MES dialogue (with `npc>:` speaker prefixes and `{{char}}` template
+  variables stripped)
+- WRONG/RIGHT examples (context, wrong, right)
+- TEST fail/pass examples
+- Per-arc-phase `voice:` and `deflection:` prose
+
+…drops generic stopwords and contractions, then reports tokens shared by
+at least `--min-share` of the corpus with at least `--min-total`
+occurrences across it.
+
+```sh
+$ python -m effigy audit characters/
+Audited 18 characters.
+TOKEN                SPREAD   TOTAL  CHARACTERS
+-----------------------------------------------
+ledger               9/18     34     dael(8), cole(4), ren(5), ...
+weathered            7/18     21     ...
+```
+
+Defaults (`--min-share=0.3`, `--min-total=3`) are tuned for mid-sized
+corpora (10-30 characters). For smaller corpora raise `--min-share`;
+for larger ones lower it.
+
+`--json` emits machine-readable findings for downstream tooling:
+
+```sh
+$ python -m effigy audit characters/ --json
+{"corpus_size": 18, "findings": [{"token": "ledger", "spread": 0.5,
+ "total": 34, "characters": ["cole", "dael", ...],
+ "counts_per_character": {"dael": 8, "cole": 4, ...}}, ...]}
+```
+
+The audit is informational — it always exits 0. Treat findings as
+authoring prompts: a token shared across half your corpus is rarely a
+deliberate voice choice. Either give one character clear ownership of
+the metaphor and remove it from the others, or accept it as a corpus-
+level idiom you've consciously chosen.
+
 ## 3. Narrator System Prompt
 
 **This is the critical step most integrations miss.** The LLM receives effigy

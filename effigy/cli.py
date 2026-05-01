@@ -7,6 +7,7 @@ Usage:
     python -m effigy.cli evaluate <file.effigy> <original.json>  # roundtrip fidelity
     python -m effigy.cli metrics <effigy_dir> <corpus_dir>       # compression metrics
     python -m effigy.cli evaluate-all <effigy_dir> <corpus_dir>  # evaluate all pairs
+    python -m effigy.cli audit <effigy_dir>        # cross-character tic detection
 """
 
 from __future__ import annotations
@@ -256,6 +257,88 @@ def cmd_context(args: argparse.Namespace) -> None:
         print("(no context generated — check arc phases and goals)")
 
 
+def cmd_audit(args: argparse.Namespace) -> None:
+    """Static cross-character tic detection over an effigy corpus."""
+    import json as _json
+    from effigy.audit import find_cross_character_tics, format_findings_table
+    from effigy.parser import ParseError, parse
+
+    paths: list[Path] = []
+    for arg in args.paths:
+        p = Path(arg)
+        if p.is_dir():
+            paths.extend(sorted(p.glob("*.effigy")))
+        elif p.is_file():
+            paths.append(p)
+        else:
+            print(f"Not found: {p}", file=sys.stderr)
+            sys.exit(1)
+
+    if not paths:
+        print("No .effigy files found.", file=sys.stderr)
+        sys.exit(1)
+
+    asts = []
+    seen_ids: dict[str, Path] = {}
+    for path in paths:
+        try:
+            ast = parse(path.read_text(encoding="utf-8"))
+        except ParseError as e:
+            print(f"Parse error in {path}: {e}", file=sys.stderr)
+            sys.exit(1)
+        cid = ast.char_id or ast.name
+        if cid and cid in seen_ids:
+            print(
+                f"Duplicate @id {cid!r} in {path} (first seen in {seen_ids[cid]}). "
+                f"Each .effigy must have a unique @id.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if cid:
+            seen_ids[cid] = path
+        asts.append(ast)
+
+    if len(asts) < 2:
+        if args.json:
+            print(_json.dumps({"corpus_size": len(asts), "findings": []}))
+        else:
+            print(f"Need at least 2 characters to audit (got {len(asts)}).")
+        return
+
+    try:
+        findings = find_cross_character_tics(
+            asts,
+            min_share=args.min_share,
+            min_total=args.min_total,
+        )
+    except ValueError as e:
+        print(f"Audit error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.json:
+        n = len(asts)
+        payload = {
+            "corpus_size": n,
+            "min_share": args.min_share,
+            "min_total": args.min_total,
+            "findings": [
+                {
+                    "token": f.token,
+                    "spread": f.spread(n),
+                    "total": f.total,
+                    "characters": f.characters,
+                    "counts_per_character": f.counts_per_character,
+                }
+                for f in findings
+            ],
+        }
+        print(_json.dumps(payload))
+        return
+
+    print(f"Audited {len(asts)} characters.")
+    print(format_findings_table(findings, corpus_size=len(asts)))
+
+
 def cmd_metrics(args: argparse.Namespace) -> None:
     """Measure compression metrics across effigy/corpus pairs."""
     import json as _json
@@ -339,6 +422,28 @@ def main():
     p_metrics.add_argument("corpus_dir", help="Directory of corpus JSON files")
     p_metrics.add_argument("--char-map", help="JSON file mapping char_id → filename")
 
+    # audit
+    p_audit = subparsers.add_parser(
+        "audit",
+        help="Detect cross-character voice tics in an effigy corpus",
+    )
+    p_audit.add_argument(
+        "paths", nargs="+",
+        help="One or more .effigy files or directories",
+    )
+    p_audit.add_argument(
+        "--min-share", type=float, default=0.3,
+        help="Minimum corpus fraction sharing a token (default: 0.3)",
+    )
+    p_audit.add_argument(
+        "--min-total", type=int, default=3,
+        help="Minimum total occurrences across the corpus (default: 3)",
+    )
+    p_audit.add_argument(
+        "--json", action="store_true",
+        help="Emit findings as JSON instead of a text table",
+    )
+
     args = parser.parse_args()
 
     commands = {
@@ -349,6 +454,7 @@ def main():
         "evaluate": cmd_evaluate,
         "evaluate-all": cmd_evaluate_all,
         "metrics": cmd_metrics,
+        "audit": cmd_audit,
     }
     commands[args.command](args)
 
