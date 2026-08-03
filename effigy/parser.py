@@ -1057,6 +1057,11 @@ def _parse_header(state: _ParserState, ast: CharacterAST) -> None:
         ast.trope_tags = [t.strip() for t in value.split(",") if t.strip()]
     elif key == "@theme":
         ast.theme = value
+    else:
+        # Unrecognised keys used to be dropped here without a word, which made
+        # a typo'd header and a header for a downstream consumer look the same
+        # from inside the file: both vanish. Keep them.
+        ast.extra.setdefault(key, []).append(value)
 
 
 def parse_file(path: str) -> CharacterAST:

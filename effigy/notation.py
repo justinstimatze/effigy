@@ -226,6 +226,16 @@ class CharacterAST:
     trope_tags: list[str] = field(default_factory=list)
     theme: str = ""  # thematic representation: what viewpoint on central themes
 
+    # Header keys this notation does not define, kept verbatim for whoever put
+    # them there. Values are lists so a repeated key accumulates rather than
+    # overwriting, which is what a downstream tool wants when it uses the header
+    # for a list of directives.
+    #
+    # The alternative was growing a block per consumer. A character notation
+    # should not learn what a prose linter means by "@gate"; passing the string
+    # through costs nothing and keeps the grammar this file's business.
+    extra: dict[str, list[str]] = field(default_factory=dict)
+
     # Voice
     voice: VoiceAST | None = None
 
