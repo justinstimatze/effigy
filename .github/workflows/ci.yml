@@ -44,14 +44,19 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: go/go.mod
           # No dependencies, so no go.sum for the cache to key on.
           cache: false
 
-      - name: Vet
-        run: go vet ./...
+      - name: Format
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
         working-directory: go
 
       - name: Test
         run: go test ./... -v
         working-directory: go
+
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+          working-directory: go
