@@ -31,3 +31,27 @@ jobs:
 
       - name: Import check
         run: python -c "from effigy import parse, CharacterAST, NarrativeRole; print('OK')"
+
+  go:
+    # go/notation reads the notation the Python package defines, and its tests
+    # compare the two declarations directly. Running it here is the point: a
+    # block added to notation.py without the Go vocabulary fails on the commit
+    # that adds it rather than in a consumer later.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          # No dependencies, so no go.sum for the cache to key on.
+          cache: false
+
+      - name: Vet
+        run: go vet ./...
+        working-directory: go
+
+      - name: Test
+        run: go test ./... -v
+        working-directory: go
