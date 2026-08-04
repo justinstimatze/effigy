@@ -8,6 +8,12 @@ import "strings"
 // rule of the notation and not a choice a consumer gets to make — see MES.
 type Example struct {
 	// Text is the example, joined per the notation's rules.
+	//
+	// Its shape is not uniform, and a consumer that prints it has to care: an
+	// exchange arrives as multiple lines carrying literal "{{user}}:" and
+	// "{{char}}:" prefixes, while an utterance is one line with a "{{char}}:"
+	// prefix. A renderer that strips neither and expects the second will print
+	// a user turn into a frame meant for the character speaking alone.
 	Text string
 	// Tier is the trust level the example is gated to: "low", "moderate",
 	// "high", or "any" when ungated.
